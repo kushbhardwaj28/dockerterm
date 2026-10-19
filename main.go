@@ -1,148 +1,65 @@
+// Command dockerterm is a terminal UI for Docker.
 package main
 
 import (
-	"context"
-	"docker_cmd"
+	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
-	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
 
-	"ui_components"
+	"github.com/kushbhardwaj28/dockerterm/internal/docker"
+	"github.com/kushbhardwaj28/dockerterm/internal/ui"
 )
 
+// version is set at build time: go build -ldflags "-X main.version=v0.1.0"
+var version = "dev"
+
 func main() {
-	f, err := tea.LogToFile("logs/debug.log", "debug")
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "dockerterm:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	var (
+		host        = flag.String("host", "", "daemon socket to connect to (default: DOCKER_HOST, then the current docker context)")
+		interval    = flag.Duration("interval", 2*time.Second, "how often to refresh")
+		debug       = flag.Bool("debug", os.Getenv("DOCKERTERM_DEBUG") != "", "write a debug log to "+debugLogPath())
+		showVersion = flag.Bool("version", false, "print the version and exit")
+	)
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("dockerterm", version)
+		return nil
+	}
+	if *debug {
+		f, err := tea.LogToFile(debugLogPath(), "debug")
+		if err != nil {
+			return fmt.Errorf("debug log: %w", err)
+		}
+		defer f.Close()
+	}
+
+	endpoint, err := docker.ResolveEndpoint(*host)
 	if err != nil {
-		fmt.Println("Error setting up log file:", err)
-		os.Exit(1)
+		return err
 	}
-	defer f.Close()
-	// Create a app model
-	appModel := NewModel()
-
-	// create a new bubble tea instance
-	newProgram := tea.NewProgram(appModel)
-
-	// Run bubble tea
-	if _, err := newProgram.Run(); err != nil {
-		fmt.Printf("Err running bubble tea: %v\n", err)
-		os.Exit(1)
+	client, err := docker.NewClient(endpoint)
+	if err != nil {
+		return err
 	}
+	defer client.Close()
 
+	model := ui.New(client, ui.Options{Endpoint: endpoint.Label(), RefreshInterval: *interval})
+	_, err = tea.NewProgram(model).Run()
+	return err
 }
 
-// App Model
-type Model struct {
-	title         string
-	commandResult []docker_cmd.DockerPs
-	statsByID     map[string]docker_cmd.DockerStats
-	refreshErr    error
-	statsFailed   bool
-	dockerPsTable table.Model
-	width         int
-	height        int
-	detailsOpen   bool
-	loaded        bool
-}
-
-func NewModel() Model {
-	return Model{
-		title:         "DockerTerm",
-		dockerPsTable: ui_components.CreateDockerPSTable([]docker_cmd.DockerPs{}),
-		detailsOpen:   false,
-	}
-}
-
-// Model boilerplate
-func (m Model) Init() tea.Cmd {
-	return refreshContainers
-}
-
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyPressMsg:
-		switch msg.String() {
-		case "ctrl+c", "q":
-			return m, tea.Quit
-		case "enter":
-			if len(m.commandResult) > 0 {
-				m.detailsOpen = !m.detailsOpen
-				m.resizeTable()
-			}
-			return m, nil
-		}
-		var cmd tea.Cmd
-		m.dockerPsTable, cmd = m.dockerPsTable.Update(msg)
-		return m, cmd
-	case tea.WindowSizeMsg:
-		if m.width == 0 && msg.Width < 100 {
-			m.detailsOpen = false
-		}
-		m.width, m.height = msg.Width, msg.Height
-		m.resizeTable()
-	case refreshTick:
-		return m, refreshContainers
-	case refreshResult:
-		m.statsByID = make(map[string]docker_cmd.DockerStats, len(msg.stats))
-		if msg.listErr == nil {
-			selectedID := ""
-			if index := m.dockerPsTable.Cursor(); index >= 0 && index < len(m.commandResult) {
-				selectedID = m.commandResult[index].ID
-			}
-			m.commandResult = msg.containers
-			m.loaded = true
-			m.dockerPsTable = ui_components.SetTableData(&m.dockerPsTable, m.commandResult, nil)
-			index := 0
-			for position, container := range m.commandResult {
-				if container.ID == selectedID {
-					index = position
-					break
-				}
-			}
-			m.dockerPsTable.SetCursor(index)
-			if msg.statsErr == nil {
-				for _, stats := range msg.stats {
-					m.statsByID[stats.ID] = stats
-				}
-			}
-		}
-		m.refreshErr = msg.listErr
-		m.statsFailed = msg.listErr == nil && msg.statsErr != nil
-		if m.refreshErr == nil {
-			m.refreshErr = msg.statsErr
-		}
-		m.dockerPsTable = ui_components.SetTableData(&m.dockerPsTable, m.commandResult, m.statsByID)
-		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return refreshTick{} })
-	}
-
-	return m, nil
-}
-
-func (m Model) View() tea.View {
-	newView := tea.NewView(m.renderLayout())
-
-	newView.AltScreen = true
-	return newView
-}
-
-// Cmd
-func refreshContainers() tea.Msg {
-	containers, listErr := docker_cmd.ListContainers(context.Background())
-	if listErr != nil {
-		return refreshResult{listErr: listErr}
-	}
-	stats, statsErr := docker_cmd.SnapshotStats(context.Background())
-	return refreshResult{containers: containers, stats: stats, statsErr: statsErr}
-}
-
-type refreshTick struct{}
-
-type refreshResult struct {
-	containers []docker_cmd.DockerPs
-	stats      []docker_cmd.DockerStats
-	listErr    error
-	statsErr   error
+func debugLogPath() string {
+	return filepath.Join(os.TempDir(), "dockerterm-debug.log")
 }
