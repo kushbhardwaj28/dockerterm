@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"math"
@@ -15,7 +16,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/image"
 	"github.com/moby/moby/api/types/network"
 )
 
@@ -142,6 +145,13 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// muxFrame encodes one chunk of the multiplexed log stream.
+func muxFrame(stream stdcopy.StdType, payload string) []byte {
+	head := []byte{byte(stream), 0, 0, 0, 0, 0, 0, 0}
+	binary.BigEndian.PutUint32(head[4:], uint32(len(payload)))
+	return append(head, payload...)
+}
+
 // fakeDaemon serves just enough of the Engine API for the client tests.
 func fakeDaemon(t *testing.T) *Client {
 	t.Helper()
@@ -160,6 +170,14 @@ func fakeDaemon(t *testing.T) *Client {
 				{ID: "aaa", Names: []string{"/web"}, State: container.StateRunning},
 				{ID: "bbb", Names: []string{"/old"}, State: container.StateExited},
 			})
+		case path == "/containers/aaa/start" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusNoContent)
+		case path == "/containers/aaa/json":
+			_ = json.NewEncoder(w).Encode(container.InspectResponse{ID: "aaa", Config: &container.Config{Tty: false, Env: []string{"A=1"}}})
+		case path == "/containers/aaa/logs":
+			w.Header().Set("Content-Type", "application/vnd.docker.multiplexed-stream")
+			_, _ = w.Write(muxFrame(stdcopy.Stdout, "2026-10-20T10:41:02.000000000Z hello\n"))
+			_, _ = w.Write(muxFrame(stdcopy.Stderr, "2026-10-20T10:41:03.000000000Z oops\n"))
 		case path == "/containers/aaa/stats":
 			if r.URL.Query().Get("one-shot") == "true" {
 				t.Error("stats must include the previous sample")
@@ -195,6 +213,50 @@ func TestClientListAndStats(t *testing.T) {
 	}
 	if s, ok := stats["aaa"]; !ok || s.CPUPercent != 10 || s.MemoryUsage != 2048 {
 		t.Errorf("stats = %+v, want the successful sample kept", stats)
+	}
+}
+
+func TestClientActionsInspectAndLogs(t *testing.T) {
+	c := fakeDaemon(t)
+	ctx := context.Background()
+	if err := c.StartContainer(ctx, "aaa"); err != nil {
+		t.Errorf("start: %v", err)
+	}
+	if err := c.StopContainer(ctx, "zzz"); err == nil {
+		t.Error("stop of unknown container must fail")
+	}
+	d, err := c.InspectContainer(ctx, "aaa")
+	if err != nil || d.ID != "aaa" || d.Env[0] != "A=1" || !strings.Contains(d.Raw, "\n  ") {
+		t.Errorf("inspect = %+v, %v", d, err)
+	}
+	logs, err := c.Logs(ctx, "aaa", 10)
+	if err != nil || len(logs) != 2 || logs[0].Text != "hello" || logs[1].Stream != "stderr" || logs[1].Time.Second() != 3 {
+		t.Errorf("logs = %+v, %v", logs, err)
+	}
+}
+
+func TestImagesAndNetworks(t *testing.T) {
+	for in, want := range map[string][2]string{
+		"nginx:1.27":                   {"nginx", "1.27"},
+		"registry:5000/team/app:2":     {"registry:5000/team/app", "2"},
+		"registry:5000/team/app":       {"registry:5000/team/app", "latest"},
+		"ghcr.io/org/tool@sha256:abcd": {"ghcr.io/org/tool@sha256", "abcd"},
+	} {
+		if r, tag := splitRepoTag(in); r != want[0] || tag != want[1] {
+			t.Errorf("splitRepoTag(%q) = %q, %q", in, r, tag)
+		}
+	}
+	imgs := imagesFromSummary(image.Summary{ID: "sha256:0123456789abcdef", RepoTags: []string{"a:1", "b:2"}, Size: 10})
+	if len(imgs) != 2 || imgs[1].Ref() != "b:2" || imgs[0].ShortID() != "0123456789ab" {
+		t.Errorf("images = %+v", imgs)
+	}
+	dangling := imagesFromSummary(image.Summary{ID: "sha256:fedcba9876543210"})
+	if !dangling[0].Dangling() || dangling[0].Ref() != "fedcba987654" {
+		t.Errorf("dangling = %+v", dangling)
+	}
+	n := networkFromSummary(network.Summary{Network: network.Network{Name: "app", IPAM: network.IPAM{Config: []network.IPAMConfig{{Subnet: netip.MustParsePrefix("172.20.0.0/16")}}}}})
+	if n.Subnet != "172.20.0.0/16" || n.Builtin() || !(Network{Name: "bridge"}).Builtin() {
+		t.Errorf("network = %+v", n)
 	}
 }
 

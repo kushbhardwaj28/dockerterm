@@ -14,6 +14,7 @@ type Container struct {
 	ID       string
 	Name     string
 	Image    string
+	ImageID  string
 	Command  string
 	State    string // machine state: running, exited, paused, created, restarting, dead
 	Status   string // human status, e.g. "Up 3 days (healthy)"
@@ -21,6 +22,7 @@ type Container struct {
 	Created  time.Time
 	Ports    []Port
 	Networks []string
+	Volumes  []string // names of named volumes mounted into the container
 	Labels   map[string]string
 }
 
@@ -96,6 +98,8 @@ type Stats struct {
 	PIDs        uint64
 	NetRx       uint64 // bytes received, all interfaces
 	NetTx       uint64 // bytes sent, all interfaces
+	BlockRead   uint64 // bytes read from block devices
+	BlockWrite  uint64 // bytes written to block devices
 }
 
 // MemoryPercent is memory usage as a percentage of the limit.

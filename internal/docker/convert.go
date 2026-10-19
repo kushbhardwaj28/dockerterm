@@ -14,6 +14,7 @@ func containerFromSummary(s container.Summary) Container {
 	c := Container{
 		ID:      s.ID,
 		Image:   s.Image,
+		ImageID: s.ImageID,
 		Command: s.Command,
 		State:   string(s.State),
 		Status:  s.Status,
@@ -33,6 +34,11 @@ func containerFromSummary(s container.Summary) Container {
 		}
 		c.Ports = append(c.Ports, port)
 	}
+	for _, mp := range s.Mounts {
+		if mp.Name != "" {
+			c.Volumes = append(c.Volumes, mp.Name)
+		}
+	}
 	if s.NetworkSettings != nil {
 		c.Networks = slices.Sorted(maps.Keys(s.NetworkSettings.Networks))
 	}
@@ -51,6 +57,14 @@ func statsFromResponse(r container.StatsResponse) Stats {
 	for _, n := range r.Networks {
 		s.NetRx += n.RxBytes
 		s.NetTx += n.TxBytes
+	}
+	for _, e := range r.BlkioStats.IoServiceBytesRecursive {
+		switch strings.ToLower(e.Op) {
+		case "read":
+			s.BlockRead += e.Value
+		case "write":
+			s.BlockWrite += e.Value
+		}
 	}
 	return s
 }

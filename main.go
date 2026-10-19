@@ -55,7 +55,7 @@ func run() error {
 	}
 	defer client.Close()
 
-	model := ui.New(client, ui.Options{Endpoint: endpoint.Label(), RefreshInterval: *interval})
+	model := ui.New(client, ui.Options{Endpoint: endpoint.Label(), DockerHost: endpoint.Host, RefreshInterval: *interval})
 	_, err = tea.NewProgram(model).Run()
 	return err
 }

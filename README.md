@@ -1,10 +1,8 @@
 # dockerterm
 
-A terminal UI for Docker: see your containers, their status and live resource usage, and (soon) manage them without leaving the terminal.
+A terminal UI for Docker: browse containers, images, volumes and networks, watch live CPU and memory, read logs, open a shell and start/stop/remove things without leaving the terminal.
 
-![dockerterm design](docs/screenshot.png)
-
-> Early work in progress. Today dockerterm lists containers with live CPU and memory and shows details for the selected one. Start/stop/restart, logs, exec, images, volumes and networks are next.
+![dockerterm](docs/screenshot.png)
 
 ## Install
 
@@ -31,11 +29,18 @@ dockerterm -debug              # writes a debug log to $TMPDIR/dockerterm-debug.
 
 | Key | Action |
 | --- | --- |
-| `↑` `↓` / `j` `k` | move |
-| `g` / `G` | first / last |
-| `enter` | toggle details |
-| `ctrl+r` | refresh now |
-| `q` / `ctrl+c` | quit |
+| `1` `2` `3` `4` | containers / images / volumes / networks |
+| `↑` `↓` / `j` `k`, `g` / `G` | move, first / last |
+| `/`, `Esc`, `f` | filter by text, clear, cycle all / running / stopped |
+| `Tab`, `J` / `K` | next detail tab (Info, Logs, Stats, Env, Mounts, Inspect), scroll it |
+| `s` `x` `r` `p` | start, stop, restart, pause / unpause |
+| `d` | remove (asks first); also removes images, volumes and networks |
+| `l` `t` `i` | jump to logs, stats, inspect |
+| `e` | open a shell in the container (uses the `docker` CLI) |
+| `Enter` | toggle the details pane |
+| `ctrl+r`, `?`, `q` | refresh now, help, quit |
+
+Environment variables whose names look secret (`*PASSWORD*`, `*TOKEN*`, `*KEY*`…) are masked in the Env tab.
 
 ### Which daemon it connects to
 
