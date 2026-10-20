@@ -109,7 +109,7 @@ func renderSegs(segs []seg, bg color.Color) string {
 
 func hasBackground(st lipgloss.Style) bool {
 	c := st.GetBackground()
-	
+
 	_, none := c.(lipgloss.NoColor)
 	return !none
 }
@@ -402,7 +402,10 @@ func (m Model) renderKeys(w int) string {
 	var b strings.Builder
 	b.WriteString(" ")
 	for _, h := range m.footerHints() {
-		b.WriteString(sKeyChip.Render(h.key) + " " + sMuted.Render(h.label) + "  ")
+		b.WriteString(sKeyChip.Render(h.key))
+		b.WriteString(" ")
+		b.WriteString(sMuted.Render(h.label))
+		b.WriteString("  ")
 	}
 	return fit(b.String(), w)
 }

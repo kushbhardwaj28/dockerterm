@@ -9,12 +9,12 @@ import (
 // Palette from the dockterm design mockup. Terminals without true color get
 // the nearest 256-color match automatically.
 var (
-	cText    = lipgloss.Color("#d4d7dd")
-	cBright  = lipgloss.Color("#ffffff")
-	cMuted   = lipgloss.Color("#8b93a1")
-	cDim     = lipgloss.Color("#5d6573")
-	cLine    = lipgloss.Color("#262c36")
-	cBarBg   = lipgloss.Color("#10141a")
+	cText   = lipgloss.Color("#d4d7dd")
+	cBright = lipgloss.Color("#ffffff")
+	cMuted  = lipgloss.Color("#8b93a1")
+	cDim    = lipgloss.Color("#5d6573")
+	cLine   = lipgloss.Color("#262c36")
+	cBarBg  = lipgloss.Color("#10141a")
 	//cPanelBg = lipgloss.Color("#12161c")
 	cTrackBg = lipgloss.Color("#1a1f27")
 	cSelBg   = lipgloss.Color("#16242c")
