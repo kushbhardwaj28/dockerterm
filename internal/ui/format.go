@@ -44,11 +44,6 @@ func spread(left, right string, w int) string {
 
 func hline(w int) string { return sLine.Render(strings.Repeat("─", max(0, w))) }
 
-// fillBg paints a whole line with a background, keeping inner styles.
-func fillBg(s string, w int, bg color.Color) string {
-	return lipgloss.NewStyle().Background(bg).Width(w).MaxWidth(w).Render(fit(s, w))
-}
-
 // box pads or clips content to exactly w×h cells.
 func box(content string, w, h int) string {
 	lines := strings.Split(content, "\n")

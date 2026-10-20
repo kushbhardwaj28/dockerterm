@@ -15,7 +15,7 @@ var (
 	cDim     = lipgloss.Color("#5d6573")
 	cLine    = lipgloss.Color("#262c36")
 	cBarBg   = lipgloss.Color("#10141a")
-	cPanelBg = lipgloss.Color("#12161c")
+	//cPanelBg = lipgloss.Color("#12161c")
 	cTrackBg = lipgloss.Color("#1a1f27")
 	cSelBg   = lipgloss.Color("#16242c")
 	cDark    = lipgloss.Color("#0d1014")

@@ -52,8 +52,6 @@ func (m Model) layout() layout {
 	return l
 }
 
-func (m Model) wide() bool { return m.layout().detailW > 0 }
-
 // listRows is how many list rows fit on screen.
 func (m Model) listRows() int { return max(1, m.layout().bodyH-listChrome) }
 
@@ -111,9 +109,7 @@ func renderSegs(segs []seg, bg color.Color) string {
 
 func hasBackground(st lipgloss.Style) bool {
 	c := st.GetBackground()
-	if c == nil {
-		return false
-	}
+	
 	_, none := c.(lipgloss.NoColor)
 	return !none
 }
