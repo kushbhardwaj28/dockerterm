@@ -1,0 +1,58 @@
+# Builds release binaries and attaches them to the GitHub release.
+# Run by .github/workflows/release.yml when a v* tag is pushed.
+# Try it locally without publishing: goreleaser release --snapshot --clean
+version: 2
+
+project_name: dockerterm
+
+builds:
+  - id: dockerterm
+    main: .
+    binary: dockerterm
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    # reproducible builds: file times come from the commit, not the build machine
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: dockerterm
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    # e.g. dockerterm_0.1.0_darwin_arm64.tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE*
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "Merge pull request"
+      - "Merge branch"
+
+release:
+  # v0.2.0-rc.1 and similar are marked as pre-releases
+  prerelease: auto
+  footer: |
+    ## Install
+
+    Download the archive for your platform below, extract it and put `dockerterm` on your PATH, or:
+
+    ```sh
+    go install github.com/kushbhardwaj28/dockerterm@{{ .Tag }}
+    ```
