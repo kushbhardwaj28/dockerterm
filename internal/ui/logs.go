@@ -60,7 +60,7 @@ type (
 // is showing, and stops streaming when it is not.
 func (m *Model) ensureLogs() tea.Cmd {
 	c := m.selectedContainer()
-	if m.view != viewContainers || m.tab != tabLogs || c == nil || !(m.detailsOpen || m.zoom) {
+	if m.view != viewContainers || m.tab != tabLogs || c == nil || (!m.detailsOpen && !m.zoom) {
 		m.stopLogs()
 		return nil
 	}
