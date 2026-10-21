@@ -38,9 +38,11 @@ dockerterm -debug              # writes a debug log to $TMPDIR/dockerterm-debug.
 | `l` `t` `i` | jump to logs, stats, inspect |
 | `e` | open a shell in the container (uses the `docker` CLI) |
 | `Enter` | toggle the details pane |
+| `z` | details full width and back (`Esc` also returns); `↑` `↓` still switch container |
+| `v` | show / hide secret values in Env and Inspect (resets when you select another container) |
 | `ctrl+r`, `?`, `q` | refresh now, help, quit |
 
-Environment variables whose names look secret (`*PASSWORD*`, `*TOKEN*`, `*KEY*`…) are masked in the Env tab.
+Environment variables whose names look secret (`*PASSWORD*`, `*TOKEN*`, `*KEY*`…) are masked in the Env and Inspect tabs until you press `v`.
 
 ### Which daemon it connects to
 

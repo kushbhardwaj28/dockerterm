@@ -9,6 +9,7 @@ type keyMap struct {
 	Filter, Clear, CycleFilter            key.Binding
 	NextTab, PrevTab, Details             key.Binding
 	ScrollUp, ScrollDown                  key.Binding
+	Zoom, Reveal                          key.Binding
 
 	Start, Stop, Restart, Pause, Remove key.Binding
 	Logs, Exec, Stats, Inspect          key.Binding
@@ -47,6 +48,8 @@ func defaultKeys() keyMap {
 		Details:    kb([]string{"enter"}, "Enter", "toggle details"),
 		ScrollUp:   kb([]string{"K", "shift+up"}, "K", "scroll details up"),
 		ScrollDown: kb([]string{"J", "shift+down"}, "J", "scroll details down"),
+		Zoom:       kb([]string{"z"}, "z", "details full width / back"),
+		Reveal:     kb([]string{"v"}, "v", "show / hide secret values"),
 
 		Start:   kb([]string{"s"}, "s", "start"),
 		Stop:    kb([]string{"x"}, "x", "stop"),
@@ -70,11 +73,11 @@ func (m Model) footerHints() []footerHint {
 	if m.view == viewContainers {
 		return []footerHint{
 			{"1-4", "views"}, {"↑↓", "move"}, {"s", "start"}, {"x", "stop"}, {"r", "restart"},
-			{"p", "pause"}, {"d", "remove"}, {"l", "logs"}, {"e", "exec"}, {"t", "stats"},
+			{"p", "pause"}, {"d", "remove"}, {"l", "logs"}, {"e", "exec"}, {"z", "full width"}, {"v", "secrets"}, {"t", "stats"},
 			{"i", "inspect"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"},
 		}
 	}
-	return []footerHint{{"1-4", "views"}, {"↑↓", "move"}, {"d", "remove"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
+	return []footerHint{{"1-4", "views"}, {"↑↓", "move"}, {"d", "remove"}, {"z", "full width"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
 }
 
 // helpRows is the content of the ? overlay, in two columns.
@@ -82,7 +85,7 @@ func (m Model) helpRows() [][2]string {
 	k := m.keys
 	rows := [][2]string{{"1-4", "switch view"}}
 	for _, b := range []key.Binding{
-		k.Up, k.Down, k.Top, k.Bottom, k.Filter, k.Clear, k.CycleFilter, k.NextTab, k.Details, k.ScrollDown,
+		k.Up, k.Down, k.Top, k.Bottom, k.Filter, k.Clear, k.CycleFilter, k.NextTab, k.Details, k.Zoom, k.Reveal, k.ScrollDown,
 		k.Start, k.Stop, k.Restart, k.Pause, k.Remove, k.Logs, k.Exec, k.Stats, k.Inspect, k.Refresh, k.Quit,
 	} {
 		h := b.Help()

@@ -154,7 +154,11 @@ func (m Model) renderTabs(w int) string {
 			parts = append(parts, sMuted.Render(name))
 		}
 	}
-	return fit(strings.Join(parts, "   "), w)
+	hint := "z full width"
+	if m.zoom {
+		hint = "z back · ↑↓ next container"
+	}
+	return spread(strings.Join(parts, "   "), sDim.Render(hint), w)
 }
 
 func (m Model) infoTab(c *docker.Container, w int) []string {
@@ -289,20 +293,54 @@ func (m Model) statsTab(c *docker.Container, w int) []string {
 
 var secretKey = regexp.MustCompile(`(?i)(pass|secret|token|key|credential|auth)`)
 
+const masked = "••••••••"
+
+func isSecret(k, v string) bool { return v != "" && secretKey.MatchString(k) }
+
+// envJSON matches one "NAME=value" entry of the Env array in inspect output.
+var envJSON = regexp.MustCompile(`^(\s*")([A-Za-z_][A-Za-z0-9_.]*)=(.*)("[,]?)$`)
+
+// maskEnvJSON hides secret values in inspect output, like the Env tab.
+func maskEnvJSON(line string) string {
+	g := envJSON.FindStringSubmatch(line)
+	if g == nil || !isSecret(g[2], g[3]) {
+		return line
+	}
+	return g[1] + g[2] + "=" + masked + g[4]
+}
+
 func (m Model) envTab(w int) []string {
 	if m.detail == nil {
 		return []string{sMuted.Render("loading…")}
 	}
 	var out []string
+	secrets := 0
 	for _, e := range m.detail.Env {
 		k, v, _ := strings.Cut(e, "=")
-		if secretKey.MatchString(k) && v != "" {
-			v = "••••••••"
+		val := sText.Render(v)
+		if isSecret(k, v) {
+			secrets++
+			if m.reveal {
+				val = sPause.Render(v)
+			} else {
+				val = sDim.Render(masked)
+			}
 		}
-		out = append(out, fit(sAccent.Render(k)+sDim.Render("=")+sText.Render(v), w))
+		// long values wrap instead of being cut off
+		lines := strings.Split(ansi.Wrap(sAccent.Render(k)+sDim.Render("=")+val, w, "/,;&"), "\n")
+		for _, l := range lines {
+			out = append(out, fit(l, w))
+		}
 	}
 	if len(out) == 0 {
-		out = []string{sMuted.Render("no environment variables")}
+		return []string{sMuted.Render("no environment variables")}
+	}
+	if secrets > 0 {
+		note := fmt.Sprintf("%d secret value(s) hidden · v to show", secrets)
+		if m.reveal {
+			note = fmt.Sprintf("%d secret value(s) visible · v to hide", secrets)
+		}
+		out = append([]string{sDim.Render(note), ""}, out...)
 	}
 	return out
 }
@@ -340,6 +378,9 @@ func (m Model) inspectTab(w int) []string {
 	}
 	var out []string
 	for _, l := range strings.Split(m.detail.Raw, "\n") {
+		if !m.reveal {
+			l = maskEnvJSON(l)
+		}
 		if g := jsonKey.FindStringSubmatch(l); g != nil {
 			l = g[1] + sAccent.Render(g[2]) + sText.Render(g[3])
 		} else {

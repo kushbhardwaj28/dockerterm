@@ -140,6 +140,8 @@ type Model struct {
 	tab         detailTab
 	detailTop   int // scroll offset inside the detail tab
 	detailsOpen bool
+	zoom        bool // details pane takes the whole width
+	reveal      bool // show secret-looking env values for the selected container
 
 	// overlays and messages
 	help      bool
@@ -359,6 +361,7 @@ func (m *Model) selectionChanged(before string) tea.Cmd {
 	if m.selectedKey() == before {
 		return nil
 	}
+	m.reveal = false // secrets are revealed per container, never carried over
 	m.detail, m.logs, m.logsFor, m.detailTop = nil, nil, "", 0
 	return tea.Batch(m.selectionCmds()...)
 }
@@ -435,6 +438,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, k.Filter):
 		return m, m.query.Focus()
 	case key.Matches(msg, k.Clear):
+		if m.zoom && m.query.Value() == "" {
+			m.zoom = false
+		}
 		m.query.SetValue("")
 		m.clampCursor()
 	case key.Matches(msg, k.CycleFilter) && m.view == viewContainers:
@@ -456,8 +462,24 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.move(m.listRows())
 
 	case key.Matches(msg, k.Details):
-		if m.rowCount() > 0 {
+		switch {
+		case m.zoom:
+			m.zoom = false
+		case m.rowCount() > 0:
 			m.detailsOpen = !m.detailsOpen
+		}
+	case key.Matches(msg, k.Zoom):
+		if m.zoom || m.rowCount() > 0 {
+			m.zoom = !m.zoom
+			m.detailsOpen = true
+			m.detailTop = 0
+		}
+	case key.Matches(msg, k.Reveal) && m.view == viewContainers:
+		m.reveal = !m.reveal
+		if m.reveal {
+			m.setToast("secret values visible for "+m.selectedKeyName()+" — v to hide", toastWarn)
+		} else {
+			m.setToast("secret values hidden", toastInfo)
 		}
 	case key.Matches(msg, k.NextTab) && m.view == viewContainers:
 		return m, m.setTab((m.tab + 1) % numTabs)
@@ -596,4 +618,12 @@ func (m Model) logsCmd(id string) tea.Cmd {
 		lines, err := m.backend.Logs(ctx, id, logTail)
 		return logsMsg{id: id, lines: lines, err: err}
 	}
+}
+
+// selectedKeyName is the selected container's name, for messages.
+func (m Model) selectedKeyName() string {
+	if c := m.selectedContainer(); c != nil {
+		return c.Name
+	}
+	return "this container"
 }
