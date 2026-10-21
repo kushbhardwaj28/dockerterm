@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
@@ -179,14 +180,29 @@ func fakeDaemon(t *testing.T) *Client {
 			_, _ = w.Write(muxFrame(stdcopy.Stdout, "2026-10-20T10:41:02.000000000Z hello\n"))
 			_, _ = w.Write(muxFrame(stdcopy.Stderr, "2026-10-20T10:41:03.000000000Z oops\n"))
 		case path == "/containers/aaa/stats":
-			if r.URL.Query().Get("one-shot") == "true" {
-				t.Error("stats must include the previous sample")
+			if r.URL.Query().Get("stream") != "true" {
+				t.Error("stats must be streamed")
 			}
-			_ = json.NewEncoder(w).Encode(container.StatsResponse{
-				PreCPUStats: container.CPUStats{SystemUsage: 100},
-				CPUStats:    container.CPUStats{CPUUsage: container.CPUUsage{TotalUsage: 10}, SystemUsage: 200, OnlineCPUs: 1},
-				MemoryStats: container.MemoryStats{Usage: 2048, Limit: 4096},
-			})
+			// like the daemon: one sample per tick until the client goes away
+			for i := uint64(1); ; i++ {
+				_ = json.NewEncoder(w).Encode(container.StatsResponse{
+					PreCPUStats: container.CPUStats{CPUUsage: container.CPUUsage{TotalUsage: (i - 1) * 10}, SystemUsage: (i - 1) * 100},
+					CPUStats:    container.CPUStats{CPUUsage: container.CPUUsage{TotalUsage: i * 10}, SystemUsage: i * 100, OnlineCPUs: 1},
+					MemoryStats: container.MemoryStats{Usage: 2048, Limit: 4096},
+				})
+				w.(http.Flusher).Flush()
+				select {
+				case <-r.Context().Done():
+					return
+				case <-time.After(20 * time.Millisecond):
+				}
+			}
+		case path == "/containers/slow/stats":
+			// a busy daemon that takes ages to send the first sample
+			select {
+			case <-r.Context().Done():
+			case <-time.After(5 * time.Second):
+			}
 		default:
 			http.Error(w, `{"message":"no such container"}`, http.StatusNotFound)
 		}
@@ -207,12 +223,45 @@ func TestClientListAndStats(t *testing.T) {
 	if err != nil || len(list) != 2 || list[0].Name != "web" || list[1].State != "exited" {
 		t.Fatalf("list = %+v, %v", list, err)
 	}
-	stats, err := c.Stats(ctx, []string{"aaa", "zzz"})
+	var stats map[string]Stats
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		stats, err = c.Stats(ctx, []string{"aaa", "zzz"})
+		if _, ok := stats["aaa"]; ok && err != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if err == nil || !strings.Contains(err.Error(), "zzz") {
 		t.Errorf("stats error = %v, want the failing container named", err)
 	}
 	if s, ok := stats["aaa"]; !ok || s.CPUPercent != 10 || s.MemoryUsage != 2048 {
-		t.Errorf("stats = %+v, want the successful sample kept", stats)
+		t.Errorf("stats = %+v, want the streamed sample", stats)
+	}
+
+	// containers that are no longer asked for stop streaming
+	if _, err := c.Stats(ctx, nil); err != nil {
+		t.Errorf("empty stats: %v", err)
+	}
+	c.stats.mu.Lock()
+	open := len(c.stats.streams)
+	c.stats.mu.Unlock()
+	if open != 0 {
+		t.Errorf("%d streams still open", open)
+	}
+}
+
+// Regression: a slow daemon used to make every refresh hit its deadline
+// ("context deadline exceeded"). Stats must never wait on the daemon.
+func TestStatsDoNotBlockOnSlowDaemon(t *testing.T) {
+	c := fakeDaemon(t)
+	start := time.Now()
+	stats, err := c.Stats(context.Background(), []string{"slow"})
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Errorf("Stats took %v, want it to return at once", elapsed)
+	}
+	if err != nil || len(stats) != 0 {
+		t.Errorf("first call = %v, %v; want no sample yet and no error", stats, err)
 	}
 }
 

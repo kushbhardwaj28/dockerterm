@@ -2,25 +2,19 @@ package docker
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 
-	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 )
-
-// maxConcurrentStats caps how many stats requests run at once.
-const maxConcurrentStats = 8
 
 // Client wraps the Docker Engine API client.
 type Client struct {
 	api      *client.Client
 	endpoint Endpoint
+	stats    *statsCollector
 }
 
 // NewClient connects to the daemon described by endpoint. TLS settings
@@ -38,14 +32,17 @@ func NewClient(endpoint Endpoint) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
 	}
-	return &Client{api: api, endpoint: endpoint}, nil
+	return &Client{api: api, endpoint: endpoint, stats: newStatsCollector(api)}, nil
 }
 
 // Endpoint returns the daemon this client talks to.
 func (c *Client) Endpoint() Endpoint { return c.endpoint }
 
-// Close releases idle connections.
-func (c *Client) Close() error { return c.api.Close() }
+// Close stops the stats streams and releases connections.
+func (c *Client) Close() error {
+	c.stats.close()
+	return c.api.Close()
+}
 
 // ListContainers returns all containers, running or not, newest first.
 func (c *Client) ListContainers(ctx context.Context) ([]Container, error) {
@@ -60,47 +57,12 @@ func (c *Client) ListContainers(ctx context.Context) ([]Container, error) {
 	return out, nil
 }
 
-// Stats takes one resource sample for each container ID, in parallel.
-// It returns every sample it could get; the error joins the ones it could not.
-func (c *Client) Stats(ctx context.Context, ids []string) (map[string]Stats, error) {
-	var (
-		mu   sync.Mutex
-		wg   sync.WaitGroup
-		errs []error
-		sem  = make(chan struct{}, maxConcurrentStats)
-		out  = make(map[string]Stats, len(ids))
-	)
-	for _, id := range ids {
-		wg.Go(func() {
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			s, err := c.stats(ctx, id)
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				errs = append(errs, err)
-				return
-			}
-			out[id] = s
-		})
-	}
-	wg.Wait()
-	return out, errors.Join(errs...)
-}
-
-func (c *Client) stats(ctx context.Context, id string) (Stats, error) {
-	// IncludePreviousSample makes the daemon wait for a second sample so the
-	// CPU percentage can be computed, like `docker stats --no-stream`.
-	res, err := c.api.ContainerStats(ctx, id, client.ContainerStatsOptions{IncludePreviousSample: true})
-	if err != nil {
-		return Stats{}, fmt.Errorf("stats %s: %w", shortID(id), err)
-	}
-	defer res.Body.Close()
-	var raw container.StatsResponse
-	if err := json.NewDecoder(res.Body).Decode(&raw); err != nil {
-		return Stats{}, fmt.Errorf("stats %s: decode: %w", shortID(id), err)
-	}
-	return statsFromResponse(raw), nil
+// Stats returns the latest resource sample for each container ID. Samples come
+// from background streams (see statsCollector), so this returns immediately;
+// a container seen for the first time has no sample until its stream delivers
+// one, about a second later. The error names containers whose stream fails.
+func (c *Client) Stats(_ context.Context, ids []string) (map[string]Stats, error) {
+	return c.stats.snapshot(ids)
 }
 
 func shortID(id string) string {
