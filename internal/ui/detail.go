@@ -100,11 +100,8 @@ func kvLines(pairs [][2]string, w int) []string {
 
 // Containers.
 
-func (m Model) containerDetail(w, h int) ([]string, []string) {
-	c := m.selectedContainer()
-	if c == nil {
-		return nil, nil
-	}
+// containerHead is everything above a container's tab content.
+func (m Model) containerHead(c *docker.Container, w int) []string {
 	sub := c.ShortID() + " · " + c.Image
 	if p := c.ComposeProject(); p != "" {
 		sub += " · compose: " + p
@@ -122,10 +119,17 @@ func (m Model) containerDetail(w, h int) ([]string, []string) {
 	}, w)
 	head = append(head, m.renderTabs(w), hline(w))
 	if m.tab == tabLogs {
-		status := m.logsStatus()
-		left := fit(sDim.Render("docker logs -f "+c.Name), max(0, w-lipgloss.Width(status)-2))
-		head = append(head, spread(left, status, w))
+		head = append(head, m.logsHeader(c.Name, w), m.logsBar(w))
 	}
+	return head
+}
+
+func (m Model) containerDetail(w, h int) ([]string, []string) {
+	c := m.selectedContainer()
+	if c == nil {
+		return nil, nil
+	}
+	head := m.containerHead(c, w)
 
 	var body []string
 	switch m.tab {
@@ -133,6 +137,9 @@ func (m Model) containerDetail(w, h int) ([]string, []string) {
 		body = m.infoTab(c, w)
 	case tabLogs:
 		body = m.logsView(w, max(1, h-len(head)-1))
+		if m.log.popup {
+			body = append(body, "") // keeps the layout; the popup is drawn on top
+		}
 	case tabStats:
 		body = m.statsTab(c, w)
 	case tabEnv:

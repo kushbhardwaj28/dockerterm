@@ -425,7 +425,7 @@ func TestDetailTabs(t *testing.T) {
 	}
 	m = feedLogs(t, m, cmd)
 	s := screen(m)
-	assertContains(t, s, "docker logs -f web-nginx", "● following · 2 lines", "10:41:02 INFO  GET /api/users", "ERROR connection refused")
+	assertContains(t, s, "docker logs -f web-nginx", "● live · 2 lines", "10:41:02 INFO  GET /api/users", "ERROR connection refused")
 	if strings.Contains(s, "INFO  INFO") {
 		t.Error("level must not be repeated in the message")
 	}

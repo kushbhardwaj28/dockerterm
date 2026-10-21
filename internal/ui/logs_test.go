@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/kushbhardwaj28/dockerterm/internal/docker"
 )
@@ -63,35 +64,138 @@ func openLogs(t *testing.T, b *fakeBackend) Model {
 func TestLiveLogsFollowNewOutput(t *testing.T) {
 	b := &fakeBackend{logs: logLines(0, 10), live: make(chan []docker.LogLine, 4)}
 	m := openLogs(t, b)
-	assertContains(t, screen(m), "line 00009", "● following · 10 lines")
+	assertContains(t, screen(m), "line 00009", "● live · 10 lines", "Enter to browse")
 
 	b.live <- logLines(10, 12)
 	m = feedLogs(t, m, waitLogs(m.logChan(t)))
-	assertContains(t, screen(m), "line 00011", "● following · 12 lines")
+	assertContains(t, screen(m), "line 00011", "● live · 12 lines")
 	m.stopLogs()
 }
 
-func TestScrollingBackPausesAndFollowResumes(t *testing.T) {
+func TestBrowsingHighlightsTheCurrentLine(t *testing.T) {
 	b := &fakeBackend{logs: logLines(0, 100), live: make(chan []docker.LogLine, 4)}
 	m := openLogs(t, b)
-	m, _ = step(t, m, press("K"), press("K"))
-	s := screen(m)
-	assertContains(t, s, "‖ paused · F follow", "line 00093")
-	if strings.Contains(s, "line 00099") {
-		t.Error("scrolling back must hide the newest lines")
+	m, _ = step(t, m, press("enter"))
+	if !m.log.focus || m.log.cursor != 99 {
+		t.Fatalf("Enter must focus the logs on the newest line, cursor = %d", m.log.cursor)
 	}
+	assertContains(t, screen(m), "LOGS", "↑↓ line")
+
+	m, _ = step(t, m, press("up"), press("up"), press("up"))
+	if c := m.selectedContainer(); c == nil || c.ID != "aaa" {
+		t.Error("↑ must move the log line, not the container")
+	}
+	if m.log.cursor != 96 || m.log.follow {
+		t.Errorf("cursor = %d follow = %v, want 96 and paused", m.log.cursor, m.log.follow)
+	}
+	// the current line has the highlight background (#1f3d4a)
+	var current string
+	for _, row := range strings.Split(m.View().Content, "\n") {
+		if strings.Contains(ansi.Strip(row), "line 00096") {
+			current = row
+		}
+	}
+	if !strings.Contains(current, "48;2;31;61;74") {
+		t.Errorf("current line is not highlighted: %q", current)
+	}
+	assertContains(t, screen(m), "‖ paused · G live")
 
 	b.live <- logLines(100, 105)
 	m = feedLogs(t, m, waitLogs(m.logChan(t)))
-	s = screen(m)
-	assertContains(t, s, "5 new", "line 00093")
-	if strings.Contains(s, "line 00104") {
-		t.Error("new lines must not move a paused view")
+	assertContains(t, screen(m), "5 new")
+	if m.log.cursor != 96 {
+		t.Error("new lines must not move the current line")
 	}
 
-	m, _ = step(t, m, press("F"))
-	assertContains(t, screen(m), "● following · 105 lines", "line 00104")
+	m, _ = step(t, m, press("G"))
+	assertContains(t, screen(m), "● live · 105 lines", "line 00104")
+	m, _ = step(t, m, press("esc"))
+	if m.log.focus {
+		t.Error("Esc must give the keys back to the container list")
+	}
 	m.stopLogs()
+}
+
+func TestSearchJumpsBetweenMatches(t *testing.T) {
+	b := &fakeBackend{logs: logLines(0, 50)}
+	m := openLogs(t, b)
+	m, _ = step(t, m, press("enter"), press("/"))
+	for _, r := range "line 0001" {
+		m, _ = step(t, m, press(string(r)))
+	}
+	m, _ = step(t, m, press("enter"))
+	// matches: 00010..00019 → the newest is 00019
+	if got := m.log.lines[m.log.view[m.log.cursor]].msg; got != "line 00019" {
+		t.Fatalf("after search the current line is %q, want the newest match", got)
+	}
+	assertContains(t, screen(m), "/ line 0001", "10/10")
+	m, _ = step(t, m, press("N"), press("N"))
+	if got := m.log.lines[m.log.view[m.log.cursor]].msg; got != "line 00017" {
+		t.Errorf("N N → %q, want line 00017", got)
+	}
+	m, _ = step(t, m, press("n"))
+	assertContains(t, screen(m), "9/10")
+	m, _ = step(t, m, press("esc"))
+	if m.log.search != "" || !m.log.focus {
+		t.Error("first Esc clears the search and keeps focus")
+	}
+}
+
+func TestFiltersByLevelStreamAndText(t *testing.T) {
+	lines := logLines(0, 6)
+	lines[2].Text, lines[2].Stream = "ERROR db down", "stderr"
+	lines[4].Text = "WARN slow"
+	b := &fakeBackend{logs: lines}
+	m := openLogs(t, b)
+	assertContains(t, screen(m), "ERROR 1", "WARN 1")
+
+	m, _ = step(t, m, press("enter"), press("e"))
+	if len(m.log.view) != 1 {
+		t.Errorf("errors only: %d lines", len(m.log.view))
+	}
+	assertContains(t, screen(m), "errors only", "1 of 6 lines", "db down")
+	m, _ = step(t, m, press("w"))
+	if len(m.log.view) != 2 {
+		t.Errorf("warn+: %d lines", len(m.log.view))
+	}
+	m, _ = step(t, m, press("a"), press("o"), press("o"))
+	if len(m.log.view) != 1 || m.log.stream != "stderr" {
+		t.Errorf("stderr only: %d lines, stream %q", len(m.log.view), m.log.stream)
+	}
+	m, _ = step(t, m, press("c"), press("&"))
+	for _, r := range "00003" {
+		m, _ = step(t, m, press(string(r)))
+	}
+	m, _ = step(t, m, press("enter"))
+	if len(m.log.view) != 1 {
+		t.Errorf("& 00003: %d lines", len(m.log.view))
+	}
+	assertContains(t, screen(m), "& 00003", "c clear")
+	m, _ = step(t, m, press("c"))
+	if len(m.log.view) != 6 {
+		t.Error("c must clear all filters")
+	}
+}
+
+func TestLinePopupAndCopy(t *testing.T) {
+	lines := logLines(0, 3)
+	lines[2].Text = `{"level":"info","msg":"order created","order":{"id":1182,"total":42.5}}`
+	b := &fakeBackend{logs: lines}
+	m := openLogs(t, b)
+	m, _ = step(t, m, press("enter"), press("enter"))
+	if !m.log.popup {
+		t.Fatal("Enter on a line must open it")
+	}
+	s := screen(m)
+	assertContains(t, s, "log line", `"msg": "order created"`, `"id": 1182`, "y  copy")
+	_, cmd := step(t, m, press("y"))
+	if cmd == nil {
+		t.Fatal("y must copy")
+	}
+	m, _ = step(t, m, press("esc"))
+	if m.log.popup || !m.log.focus {
+		t.Error("Esc closes the popup and stays in the logs")
+	}
 }
 
 func TestOlderLogsLoadWhenReachingTheTop(t *testing.T) {
@@ -100,24 +204,23 @@ func TestOlderLogsLoadWhenReachingTheTop(t *testing.T) {
 	if n := len(m.log.lines); n != logInitialTail {
 		t.Fatalf("initial lines = %d, want %d", n, logInitialTail)
 	}
-	// page back to the oldest loaded lines
-	var cmd tea.Cmd
-	for i := 0; i < 40 && cmd == nil; i++ {
-		m, cmd = step(t, m, press("["))
-	}
+	m, cmd := step(t, m, press("enter"), press("g"))
 	if cmd == nil {
-		t.Fatal("reaching the top must fetch older lines")
+		t.Fatal("going to the oldest line must fetch older lines")
 	}
 	m = feedLogs(t, m, cmd)
-	if got := len(m.log.lines); got < logInitialTail+logPageSize/2 {
-		t.Fatalf("after one page: %d lines, want at least %d", got, logInitialTail+logPageSize/2)
-	}
 	if q := b.logQueries[len(b.logQueries)-1]; !q.Until.Equal(logEpoch.Add(1200*time.Second)) || q.Tail != 0 || q.Since.IsZero() {
 		t.Errorf("older page query = %+v, want a since/until window without tail", q)
 	}
-	for i := 0; i < 80; i++ { // keep going: the last page is short, so that's the start
+	if got := len(m.log.lines); got < logInitialTail+logPageSize/2 {
+		t.Fatalf("after one page: %d lines", got)
+	}
+	if e := m.log.lines[m.log.view[m.log.cursor]]; e.msg != "line 01200" {
+		t.Errorf("current line moved to %q while older lines were added", e.msg)
+	}
+	for i := 0; i < 20 && !m.log.noOlder; i++ {
 		var c tea.Cmd
-		m, c = step(t, m, press("["))
+		m, c = step(t, m, press("g"))
 		m = feedLogs(t, m, c)
 	}
 	if !m.log.noOlder || len(m.log.lines) != 1700 {
@@ -129,7 +232,26 @@ func TestOlderLogsLoadWhenReachingTheTop(t *testing.T) {
 			t.Fatalf("lines out of order or duplicated at %d", i)
 		}
 	}
-	m.stopLogs()
+}
+
+func TestSearchContinuesIntoOlderLines(t *testing.T) {
+	b := &fakeBackend{logs: logLines(0, 1700)}
+	m := openLogs(t, b)
+	m, _ = step(t, m, press("enter"), press("/"))
+	for _, r := range "line 00042" {
+		m, _ = step(t, m, press(string(r)))
+	}
+	m, cmd := step(t, m, press("enter"))
+	for i := 0; i < 5 && cmd != nil; i++ { // older pages until the match is found
+		var next tea.Cmd
+		for _, msg := range drainLogs(cmd) {
+			m, next = step(t, m, msg)
+		}
+		cmd = next
+	}
+	if got := m.log.lines[m.log.view[m.log.cursor]].msg; got != "line 00042" {
+		t.Errorf("current line = %q, want the match from older history", got)
+	}
 }
 
 func TestStreamEndForStoppedContainer(t *testing.T) {
@@ -151,7 +273,8 @@ func TestRunningContainerStreamReconnects(t *testing.T) {
 	m := newModel(nil)
 	m, _ = step(t, m, sample())
 	m.tab, m.detailsOpen = tabLogs, true
-	m.log = logState{id: "aaa", gen: 7, follow: true, streaming: true, lines: logLines(0, 2)}
+	m.log = logState{id: "aaa", gen: 7, follow: true, streaming: true}
+	m.appendLogs(logLines(0, 2))
 	m, cmd := step(t, m, logBatchMsg{gen: 7, done: true})
 	if cmd == nil || m.log.ended {
 		t.Error("a running container's stream must reconnect")
@@ -167,7 +290,7 @@ func TestLogBufferIsCapped(t *testing.T) {
 	m := newModel(nil)
 	m.log = logState{id: "aaa", follow: true}
 	m.appendLogs(logLines(0, logMaxLines+10))
-	if n := len(m.log.lines); n != logMaxLines || m.log.lines[0].Text != "INFO line 00010" || !m.log.trimmed {
+	if n := len(m.log.lines); n != logMaxLines || m.log.lines[0].Text != "INFO line 00010" || !m.log.trimmed || len(m.log.view) != logMaxLines {
 		t.Errorf("buffer = %d lines from %q", n, m.log.lines[0].Text)
 	}
 }

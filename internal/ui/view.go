@@ -367,6 +367,12 @@ func (m Model) renderStatus(w int) string {
 		mode = "CONFIRM"
 	case m.help:
 		mode = "HELP"
+	case m.logInputKind == inputSearch:
+		mode = "SEARCH"
+	case m.logInputKind == inputGrep:
+		mode = "FILTER"
+	case m.logsShown() && m.log.focus:
+		mode = "LOGS"
 	case m.query.Focused() || m.query.Value() != "":
 		mode = "FILTER"
 	case m.zoom:
@@ -432,6 +438,8 @@ func (m Model) overlay(screen string, l layout) string {
 		dialog = m.renderConfirm(min(56, l.w-4))
 	case m.help:
 		dialog = m.renderHelp(min(76, l.w-4))
+	case m.log.popup && m.logsShown():
+		dialog = m.renderLogPopup(min(110, l.w-4), l.h)
 	default:
 		return screen
 	}

@@ -2,19 +2,20 @@ package ui
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/kushbhardwaj28/dockerterm/internal/docker"
 )
 
-// Logs are streamed live (docker logs -f) into a buffer the viewer can scroll
-// back through. Scrolling up pauses following; reaching the oldest loaded
-// lines fetches an earlier page of history.
+// Logs are streamed live (docker logs -f) into a buffer that can be browsed:
+// a highlighted current line, search, level/stream/text filters and a popup
+// for one line. This file holds the stream and the buffer; logview.go the
+// viewer.
 const (
 	logInitialTail = 500   // lines shown when the Logs tab opens
 	logPageSize    = 1000  // lines fetched per "older" page
@@ -23,20 +24,77 @@ const (
 	logReconnect   = 2 * time.Second
 )
 
+// logEntry is one buffered line plus what the viewer needs about it.
+type logEntry struct {
+	docker.LogLine
+	lvl   string // ERROR, WARN, INFO, DEBUG, ERR (stderr), OUT
+	msg   string // display text: ANSI stripped, leading level word dropped
+	lower string // msg lowercased, for search and filters
+}
+
+func newLogEntry(l docker.LogLine) logEntry {
+	lvl, _ := logLevel(l)
+	text := strings.TrimSpace(ansi.Strip(l.Text))
+	if word, rest, ok := strings.Cut(text, " "); ok && strings.EqualFold(strings.Trim(word, "[]:"), lvl) {
+		text = rest
+	}
+	return logEntry{LogLine: l, lvl: lvl, msg: text, lower: strings.ToLower(text)}
+}
+
+type logLevelFilter int
+
+const (
+	levelAll logLevelFilter = iota
+	levelWarn
+	levelError
+)
+
 type logState struct {
 	id        string
 	gen       int
 	cancel    context.CancelFunc
-	ch        <-chan logBatchMsg // the running stream, for tests
-	lines     []docker.LogLine
-	follow    bool // stick to the newest line
-	offset    int  // lines hidden below the view while paused
-	unseen    int  // lines that arrived while paused
+	ch        <-chan logBatchMsg // the running stream
+	lines     []logEntry
 	streaming bool
 	ended     bool // the daemon closed the stream (container stopped)
 	loading   bool // an older page is in flight
 	noOlder   bool // the first line of the container's log is loaded
 	trimmed   bool // old lines were dropped to respect logMaxLines
+
+	// viewer (logview.go)
+	view    []int // indexes into lines that pass the filters
+	follow  bool  // stick to the newest line
+	cursor  int   // highlighted position in view
+	top     int   // first position in view on screen
+	unseen  int   // lines that arrived while not following
+	focus   bool  // keys drive the log viewer, not the container list
+	level   logLevelFilter
+	stream  string // "", "stdout" or "stderr"
+	grep    string // only lines containing this (lowercase)
+	search  string // highlighted and jumped to with n / N (lowercase)
+	matches []int  // view positions matching search
+	nErr    int
+	nWarn   int
+	popup   bool // the current line opened in a dialog
+	popTop  int
+	// searchOlder continues an N search once an older page arrives
+	searchOlder bool
+}
+
+// logInputKind says what the log text input is collecting.
+type logInputKind int
+
+const (
+	inputNone logInputKind = iota
+	inputSearch
+	inputGrep
+)
+
+func newLogInput() textinput.Model {
+	ti := textinput.New()
+	ti.Prompt = ""
+	ti.CharLimit = 128
+	return ti
 }
 
 type (
@@ -71,14 +129,16 @@ func (m *Model) ensureLogs() tea.Cmd {
 		if !c.Running() {
 			return nil
 		}
-		// it was started again: resume after the last line we have
-		var since time.Time
-		if n := len(m.log.lines); n > 0 {
-			since = m.log.lines[n-1].Time
-		}
-		return m.startLogs(c.ID, since)
+		return m.startLogs(c.ID, m.lastLogTime()) // started again: resume
 	}
 	return m.startLogs(c.ID, time.Time{})
+}
+
+func (m *Model) lastLogTime() time.Time {
+	if n := len(m.log.lines); n > 0 {
+		return m.log.lines[n-1].Time
+	}
+	return time.Time{}
 }
 
 // startLogs opens a follow stream. A zero since starts fresh with the last
@@ -133,6 +193,8 @@ func (m *Model) stopLogs() {
 		m.log.cancel()
 	}
 	m.log = logState{}
+	m.logInput.Blur()
+	m.logInputKind = inputNone
 }
 
 func (m *Model) handleLogBatch(msg logBatchMsg) tea.Cmd {
@@ -169,11 +231,7 @@ func (m *Model) handleLogReconnect(msg logReconnectMsg) tea.Cmd {
 		m.log.ended = true
 		return nil
 	}
-	var since time.Time
-	if n := len(m.log.lines); n > 0 {
-		since = m.log.lines[n-1].Time
-	}
-	return m.startLogs(c.ID, since)
+	return m.startLogs(c.ID, m.lastLogTime())
 }
 
 // appendLogs adds new lines, skipping ones a reconnect delivered twice.
@@ -190,32 +248,69 @@ func (m *Model) appendLogs(lines []docker.LogLine) {
 	if len(lines) == 0 {
 		return
 	}
-	m.log.lines = append(m.log.lines, lines...)
-	if !m.log.follow {
-		m.log.offset += len(lines) // keep the same lines on screen
-		m.log.unseen += len(lines)
+	l := &m.log
+	for _, raw := range lines {
+		e := newLogEntry(raw)
+		l.lines = append(l.lines, e)
+		l.count(e, 1)
+		if l.passes(e) {
+			l.view = append(l.view, len(l.lines)-1)
+			if l.search != "" && strings.Contains(e.lower, l.search) {
+				l.matches = append(l.matches, len(l.view)-1)
+			}
+			if !l.follow {
+				l.unseen++
+			}
+		}
 	}
-	if over := len(m.log.lines) - logMaxLines; over > 0 {
-		m.log.lines = append([]docker.LogLine(nil), m.log.lines[over:]...)
-		m.log.trimmed, m.log.noOlder = true, false
-		m.log.offset = min(m.log.offset, len(m.log.lines)-1)
+	if over := len(l.lines) - logMaxLines; over > 0 {
+		l.trimmed, l.noOlder = true, false
+		m.replaceLines(l.lines[over:])
 	}
 }
 
-// scrollLogs moves the view by delta lines (positive = towards older).
-func (m *Model) scrollLogs(delta int) tea.Cmd {
-	n := len(m.log.lines)
-	m.log.offset = min(max(0, m.log.offset+delta), max(0, n-1))
-	if m.log.offset == 0 {
-		m.log.follow, m.log.unseen = true, 0
-	} else {
-		m.log.follow = false
+// replaceLines swaps the buffer and rebuilds everything derived from it,
+// keeping the highlighted line on the same entry where it still exists.
+func (m *Model) replaceLines(lines []logEntry) {
+	l := &m.log
+	var keep *logEntry
+	if !l.follow && l.cursor >= 0 && l.cursor < len(l.view) {
+		e := l.lines[l.view[l.cursor]]
+		keep = &e
 	}
-	return m.maybeLoadOlder()
+	l.lines = append([]logEntry(nil), lines...)
+	l.nErr, l.nWarn = 0, 0
+	for _, e := range l.lines {
+		l.count(e, 1)
+	}
+	m.rebuildView(keep)
 }
 
-func (m *Model) followLogs() {
-	m.log.offset, m.log.unseen, m.log.follow = 0, 0, true
+func (l *logState) count(e logEntry, d int) {
+	switch e.lvl {
+	case "ERROR", "ERR":
+		l.nErr += d
+	case "WARN":
+		l.nWarn += d
+	}
+}
+
+// passes reports whether an entry survives the level, stream and text filters.
+func (l *logState) passes(e logEntry) bool {
+	switch l.level {
+	case levelError:
+		if e.lvl != "ERROR" && e.lvl != "ERR" {
+			return false
+		}
+	case levelWarn:
+		if e.lvl != "ERROR" && e.lvl != "ERR" && e.lvl != "WARN" {
+			return false
+		}
+	}
+	if l.stream != "" && e.Stream != l.stream {
+		return false
+	}
+	return l.grep == "" || strings.Contains(e.lower, l.grep)
 }
 
 // maybeLoadOlder fetches an earlier page once the view nears the oldest line.
@@ -229,7 +324,7 @@ func (m *Model) maybeLoadOlder() tea.Cmd {
 	if l.loading || l.noOlder || l.trimmed || l.id == "" || len(l.lines) == 0 {
 		return nil
 	}
-	if len(l.lines)-l.offset > logPrefetch {
+	if l.top < len(l.view) && len(l.view) > 0 && l.view[min(l.top, len(l.view)-1)] > logPrefetch && !l.searchOlder {
 		return nil
 	}
 	until := l.lines[0].Time
@@ -263,7 +358,7 @@ func (m *Model) maybeLoadOlder() tea.Cmd {
 }
 
 // logWindow guesses how far back one page of lines reaches.
-func logWindow(lines []docker.LogLine) time.Duration {
+func logWindow(lines []logEntry) time.Duration {
 	span := lines[len(lines)-1].Time.Sub(lines[0].Time)
 	w := time.Duration(float64(span) / float64(len(lines)) * logPageSize * 1.5)
 	return min(max(w, 5*time.Second), 24*time.Hour)
@@ -297,85 +392,27 @@ func (m *Model) handleOlderLogs(msg olderLogsMsg) tea.Cmd {
 		lines, complete, m.log.trimmed = lines[len(lines)-max(0, room):], false, true
 	}
 	m.log.noOlder = complete
-	m.log.lines = append(append([]docker.LogLine(nil), lines...), m.log.lines...)
+
+	// Prepend: positions in the view shift by the number of new visible lines.
+	older := make([]logEntry, 0, len(lines))
+	for _, raw := range lines {
+		older = append(older, newLogEntry(raw))
+	}
+	before := len(m.log.view)
+	cursor, top := m.log.cursor, m.log.top
+	all := append(older, m.log.lines...)
+	m.log.lines = all
+	m.log.nErr, m.log.nWarn = 0, 0
+	for _, e := range all {
+		m.log.count(e, 1)
+	}
+	m.rebuildView(nil)
+	shift := len(m.log.view) - before
+	m.log.cursor, m.log.top = cursor+shift, top+shift
+
+	if m.log.searchOlder {
+		m.log.searchOlder = false
+		return m.searchStep(-1)
+	}
 	return nil
-}
-
-// Rendering.
-
-const logPrefix = 9 + 6 // "15:04:05 " + "LEVEL "
-
-// logsStatus is the right side of the logs header line.
-func (m Model) logsStatus() string {
-	l := m.log
-	count := fmt.Sprintf("%d lines", len(l.lines))
-	switch {
-	case l.ended:
-		return sMuted.Render("■ stopped · " + count)
-	case !l.follow:
-		s := "‖ paused"
-		if l.unseen > 0 {
-			s += fmt.Sprintf(" · %d new", l.unseen)
-		}
-		return sPause.Render(s + " · F follow")
-	case l.streaming:
-		return sUp.Render("● following · " + count)
-	}
-	return sMuted.Render("reconnecting…")
-}
-
-// logsView renders the visible window: the room rows ending offset lines above
-// the newest one, long messages wrapped.
-func (m Model) logsView(w, room int) []string {
-	l := m.log
-	if len(l.lines) == 0 {
-		if l.ended {
-			return []string{sMuted.Render("no output")}
-		}
-		return []string{sMuted.Render("waiting for output…")}
-	}
-	end := len(l.lines) - l.offset
-	var rows []string // built newest first, reversed at the end
-	i := end - 1
-	for ; i >= 0 && len(rows) < room; i-- {
-		entry := renderLogLine(l.lines[i], w)
-		for j := len(entry) - 1; j >= 0 && len(rows) < room; j-- {
-			rows = append(rows, entry[j])
-		}
-	}
-	if i < 0 && len(rows) < room { // the oldest loaded line is on screen
-		switch {
-		case l.loading:
-			rows = append(rows, sDim.Render("↑ loading older lines…"))
-		case l.noOlder:
-			rows = append(rows, sDim.Render("— start of logs —"))
-		case l.trimmed:
-			rows = append(rows, sDim.Render(fmt.Sprintf("— older lines dropped (keeping %d) —", logMaxLines)))
-		default:
-			rows = append(rows, sDim.Render("↑ K for older lines"))
-		}
-	}
-	for a, b := 0, len(rows)-1; a < b; a, b = a+1, b-1 {
-		rows[a], rows[b] = rows[b], rows[a]
-	}
-	return rows
-}
-
-func renderLogLine(l docker.LogLine, w int) []string {
-	lvl, st := logLevel(l)
-	ts := "        "
-	if !l.Time.IsZero() {
-		ts = l.Time.Local().Format("15:04:05")
-	}
-	text := strings.TrimSpace(ansi.Strip(l.Text))
-	// drop a leading level word we already show in its own column
-	if word, rest, ok := strings.Cut(text, " "); ok && strings.EqualFold(strings.Trim(word, "[]:"), lvl) {
-		text = rest
-	}
-	msg := strings.Split(ansi.Wrap(text, max(10, w-logPrefix), "/,"), "\n")
-	out := []string{fit(sDim.Render(ts)+" "+st.Render(fit(lvl, 5))+" "+sText.Render(msg[0]), w)}
-	for _, more := range msg[1:] {
-		out = append(out, fit(strings.Repeat(" ", logPrefix)+sText.Render(more), w))
-	}
-	return out
 }

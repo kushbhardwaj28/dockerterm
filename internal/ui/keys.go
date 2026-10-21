@@ -74,10 +74,23 @@ func defaultKeys() keyMap {
 type footerHint struct{ key, label string }
 
 func (m Model) footerHints() []footerHint {
+	if m.logsShown() && m.log.popup {
+		return []footerHint{{"↑↓", "scroll"}, {"y", "copy"}, {"Esc", "close"}, {"?", "help"}, {"q", "quit"}}
+	}
+	if m.logInputKind != inputNone {
+		return []footerHint{{"Enter", "keep"}, {"Esc", "clear"}, {"?", "help"}, {"q", "quit"}}
+	}
+	if m.logsShown() && m.log.focus {
+		return []footerHint{
+			{"↑↓", "line"}, {"[ ]", "page"}, {"g G", "top / live"}, {"/", "search"}, {"n N", "next / prev"},
+			{"&", "filter"}, {"e w a", "level"}, {"o", "stream"}, {"Enter", "open"}, {"y", "copy"},
+			{"z", "full width"}, {"Esc", "back"}, {"?", "help"}, {"q", "quit"},
+		}
+	}
 	if m.logsShown() {
 		return []footerHint{
-			{"K J", "scroll"}, {"[ ]", "page"}, {"F", "follow"}, {"z", "full width"}, {"↑↓", "container"},
-			{"Tab", "next tab"}, {"x", "stop"}, {"r", "restart"}, {"e", "exec"}, {"?", "help"}, {"q", "quit"},
+			{"Enter", "browse logs"}, {"↑↓", "container"}, {"z", "full width"}, {"Tab", "next tab"},
+			{"x", "stop"}, {"r", "restart"}, {"e", "exec"}, {"?", "help"}, {"q", "quit"},
 		}
 	}
 	if m.view == viewContainers {
@@ -95,11 +108,22 @@ func (m Model) helpRows() [][2]string {
 	k := m.keys
 	rows := [][2]string{{"1-4", "switch view"}}
 	for _, b := range []key.Binding{
-		k.Up, k.Down, k.Top, k.Bottom, k.Filter, k.Clear, k.CycleFilter, k.NextTab, k.Details, k.Zoom, k.Reveal, k.ScrollDown, k.LogPageUp, k.Follow,
+		k.Up, k.Down, k.Top, k.Bottom, k.Filter, k.Clear, k.CycleFilter, k.NextTab, k.Details, k.Zoom, k.Reveal,
 		k.Start, k.Stop, k.Restart, k.Pause, k.Remove, k.Logs, k.Exec, k.Stats, k.Inspect, k.Refresh, k.Quit,
 	} {
 		h := b.Help()
 		rows = append(rows, [2]string{h.Key, h.Desc})
 	}
-	return rows
+	return append(rows,
+		[2]string{"", ""},
+		[2]string{"LOGS", "Enter on the Logs tab to browse"},
+		[2]string{"↑↓ [ ]", "line / page"},
+		[2]string{"g G", "oldest / back to live"},
+		[2]string{"/ n N", "search, next, previous"},
+		[2]string{"&", "show only matching lines"},
+		[2]string{"e w a", "errors / warn+ / all"},
+		[2]string{"o", "stdout / stderr / both"},
+		[2]string{"c", "clear filters"},
+		[2]string{"Enter y", "open line, copy line"},
+	)
 }

@@ -132,16 +132,18 @@ type Model struct {
 	diskAsked   time.Time
 
 	// navigation
-	view        viewKind
-	cursor      [numViews]int
-	offset      [numViews]int
-	filter      stateFilter
-	query       textinput.Model
-	tab         detailTab
-	detailTop   int // scroll offset inside the detail tab
-	detailsOpen bool
-	zoom        bool // details pane takes the whole width
-	reveal      bool // show secret-looking env values for the selected container
+	view         viewKind
+	cursor       [numViews]int
+	offset       [numViews]int
+	filter       stateFilter
+	query        textinput.Model
+	logInput     textinput.Model
+	logInputKind logInputKind
+	tab          detailTab
+	detailTop    int // scroll offset inside the detail tab
+	detailsOpen  bool
+	zoom         bool // details pane takes the whole width
+	reveal       bool // show secret-looking env values for the selected container
 
 	// overlays and messages
 	help      bool
@@ -171,6 +173,7 @@ func New(backend Backend, opts Options) Model {
 		stats:       map[string]docker.Stats{},
 		cpuHist:     map[string][]float64{},
 		query:       q,
+		logInput:    newLogInput(),
 		detailsOpen: true,
 		toast:       "connecting to docker…",
 	}
@@ -412,6 +415,35 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.selectionChanged(before)
 	}
 
+	if m.logInputKind != inputNone {
+		return m, m.logInputKey(msg)
+	}
+	if m.logsShown() && m.log.focus && !key.Matches(msg, k.Quit) {
+		if cmd, handled := m.logKey(msg); handled {
+			return m, cmd
+		}
+	}
+
+	if m.logsShown() && !m.log.focus && (key.Matches(msg, k.Details, k.ScrollUp, k.ScrollDown, k.LogPageUp, k.LogPageDown) ||
+		(key.Matches(msg, k.Logs) && m.tab == tabLogs)) {
+		// browse the logs: the arrow keys now move the highlighted line
+		m.log.focus = true
+		if m.log.follow {
+			m.pinFollow()
+		}
+		switch {
+		case key.Matches(msg, k.ScrollUp):
+			return m, m.moveLog(-3)
+		case key.Matches(msg, k.ScrollDown):
+			return m, m.moveLog(3)
+		case key.Matches(msg, k.LogPageUp):
+			return m, m.moveLog(-max(1, m.logRoom()-2))
+		case key.Matches(msg, k.LogPageDown):
+			return m, m.moveLog(max(1, m.logRoom()-2))
+		}
+		return m, nil
+	}
+
 	before := m.selectedKey()
 	switch {
 	case key.Matches(msg, k.Quit):
@@ -476,14 +508,6 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.setTab((m.tab + 1) % numTabs)
 	case key.Matches(msg, k.PrevTab) && m.view == viewContainers:
 		return m, m.setTab((m.tab + numTabs - 1) % numTabs)
-	case key.Matches(msg, k.ScrollDown) && m.logsShown():
-		return m, m.scrollLogs(-3)
-	case key.Matches(msg, k.ScrollUp) && m.logsShown():
-		return m, m.scrollLogs(3)
-	case key.Matches(msg, k.LogPageDown) && m.logsShown():
-		return m, m.scrollLogs(-m.logPage())
-	case key.Matches(msg, k.LogPageUp) && m.logsShown():
-		return m, m.scrollLogs(m.logPage())
 	case key.Matches(msg, k.Follow) && m.logsShown():
 		m.followLogs()
 	case key.Matches(msg, k.ScrollDown):
