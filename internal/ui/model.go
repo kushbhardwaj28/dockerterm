@@ -521,9 +521,15 @@ func (m Model) ctx() (context.Context, context.CancelFunc) {
 
 func (m Model) refreshCmd() tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := m.ctx()
-		defer cancel()
-		containers, err := m.backend.ListContainers(ctx)
+		// each call gets its own deadline so one slow endpoint cannot starve the rest
+		call := func(fn func(ctx context.Context)) {
+			ctx, cancel := m.ctx()
+			defer cancel()
+			fn(ctx)
+		}
+		var containers []docker.Container
+		var err error
+		call(func(ctx context.Context) { containers, err = m.backend.ListContainers(ctx) })
 		if err != nil {
 			return refreshMsg{listErr: err, at: time.Now()}
 		}
@@ -533,10 +539,18 @@ func (m Model) refreshCmd() tea.Cmd {
 				running = append(running, c.ID)
 			}
 		}
-		stats, statsErr := m.backend.Stats(ctx, running)
-		images, e1 := m.backend.ListImages(ctx)
-		volumes, e2 := m.backend.ListVolumes(ctx)
-		networks, e3 := m.backend.ListNetworks(ctx)
+		var (
+			stats            map[string]docker.Stats
+			images           []docker.Image
+			volumes          []docker.Volume
+			networks         []docker.Network
+			statsErr, e1, e2 error
+			e3               error
+		)
+		call(func(ctx context.Context) { stats, statsErr = m.backend.Stats(ctx, running) })
+		call(func(ctx context.Context) { images, e1 = m.backend.ListImages(ctx) })
+		call(func(ctx context.Context) { volumes, e2 = m.backend.ListVolumes(ctx) })
+		call(func(ctx context.Context) { networks, e3 = m.backend.ListNetworks(ctx) })
 		return refreshMsg{
 			containers: containers, stats: stats, statsErr: statsErr,
 			images: images, volumes: volumes, networks: networks,
