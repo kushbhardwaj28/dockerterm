@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/moby/moby/client"
@@ -157,24 +156,6 @@ func (c *Client) InspectContainer(ctx context.Context, id string) (ContainerDeta
 		return ContainerDetail{}, fmt.Errorf("inspect %s: %w", shortID(id), err)
 	}
 	return detailFromInspect(res.Container, res.Raw), nil
-}
-
-// Logs returns the last tail lines of a container's output.
-func (c *Client) Logs(ctx context.Context, id string, tail int) ([]LogLine, error) {
-	// A container with a TTY sends one raw stream; others multiplex stdout/stderr.
-	insp, err := c.api.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("logs %s: %w", shortID(id), err)
-	}
-	tty := insp.Container.Config != nil && insp.Container.Config.Tty
-	rc, err := c.api.ContainerLogs(ctx, id, client.ContainerLogsOptions{
-		ShowStdout: true, ShowStderr: true, Timestamps: true, Tail: strconv.Itoa(tail),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("logs %s: %w", shortID(id), err)
-	}
-	defer rc.Close()
-	return parseLogs(rc, tty)
 }
 
 // StartContainer is `docker start`.

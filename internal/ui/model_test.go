@@ -24,6 +24,8 @@ type fakeBackend struct {
 	volumes    []docker.Volume
 	networks   []docker.Network
 	logs       []docker.LogLine
+	live       chan []docker.LogLine
+	logQueries []docker.LogQuery
 	listErr    error
 	statsIDs   []string
 	calls      []string
@@ -56,8 +58,49 @@ func (f *fakeBackend) InspectContainer(_ context.Context, id string) (docker.Con
 	return docker.ContainerDetail{ID: id, Env: []string{"NODE_ENV=production", "DB_PASSWORD=hunter2"}, RestartPolicy: "always",
 		Raw: "{\n  \"Env\": [\n    \"NODE_ENV=production\",\n    \"DB_PASSWORD=hunter2\"\n  ]\n}"}, nil
 }
-func (f *fakeBackend) Logs(context.Context, string, int) ([]docker.LogLine, error) {
-	return f.logs, nil
+
+// Logs behaves like the daemon: tail is applied to the whole log first, then
+// since/until (both inclusive) filter what is left.
+func (f *fakeBackend) Logs(_ context.Context, _ string, q docker.LogQuery) ([]docker.LogLine, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logQueries = append(f.logQueries, q)
+	all := f.logs
+	if q.Tail > 0 && len(all) > q.Tail {
+		all = all[len(all)-q.Tail:]
+	}
+	var out []docker.LogLine
+	for _, l := range all {
+		if (!q.Since.IsZero() && l.Time.Before(q.Since)) || (!q.Until.IsZero() && l.Time.After(q.Until)) {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out, nil
+}
+
+// FollowLogs sends the tail of f.logs, then whatever is pushed on f.live,
+// until the stream is cancelled or f.live is closed (container stopped).
+func (f *fakeBackend) FollowLogs(ctx context.Context, id string, q docker.LogQuery, emit func([]docker.LogLine)) error {
+	first, _ := f.Logs(ctx, id, docker.LogQuery{Tail: q.Tail})
+	if q.Since.IsZero() {
+		emit(first)
+	}
+	if f.live == nil {
+		<-ctx.Done()
+		return nil
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case batch, ok := <-f.live:
+			if !ok {
+				return nil
+			}
+			emit(batch)
+		}
+	}
 }
 func (f *fakeBackend) StartContainer(_ context.Context, id string) error {
 	return f.record("start " + id)
@@ -378,11 +421,11 @@ func TestDetailTabs(t *testing.T) {
 
 	m, cmd = step(t, m, press("l"))
 	if m.tab != tabLogs || cmd == nil {
-		t.Fatal("l must open logs and fetch them")
+		t.Fatal("l must open logs and stream them")
 	}
-	m, _ = step(t, m, drain(cmd)...)
+	m = feedLogs(t, m, cmd)
 	s := screen(m)
-	assertContains(t, s, "docker logs -f --tail 200 web-nginx", "● following", "10:41:02 INFO  GET /api/users", "ERROR connection refused")
+	assertContains(t, s, "docker logs -f web-nginx", "● following · 2 lines", "10:41:02 INFO  GET /api/users", "ERROR connection refused")
 	if strings.Contains(s, "INFO  INFO") {
 		t.Error("level must not be repeated in the message")
 	}

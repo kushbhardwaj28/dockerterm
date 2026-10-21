@@ -1,15 +1,11 @@
 package docker
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
-	"io"
-	"slices"
 	"strings"
 	"time"
 
-	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/image"
 	"github.com/moby/moby/api/types/network"
@@ -199,38 +195,4 @@ func detailFromInspect(r container.InspectResponse, raw json.RawMessage) Contain
 		d.Raw = buf.String()
 	}
 	return d
-}
-
-// parseLogs reads a log stream requested with timestamps. Containers without
-// a TTY multiplex stdout and stderr; with a TTY the stream is raw.
-func parseLogs(r io.Reader, tty bool) ([]LogLine, error) {
-	if tty {
-		return splitLogLines(r, "stdout")
-	}
-	var stdout, stderr bytes.Buffer
-	if _, err := stdcopy.StdCopy(&stdout, &stderr, r); err != nil {
-		return nil, err
-	}
-	out, _ := splitLogLines(&stdout, "stdout")
-	errs, _ := splitLogLines(&stderr, "stderr")
-	out = append(out, errs...)
-	slices.SortStableFunc(out, func(a, b LogLine) int { return a.Time.Compare(b.Time) })
-	return out, nil
-}
-
-func splitLogLines(r io.Reader, stream string) ([]LogLine, error) {
-	var lines []LogLine
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
-	for sc.Scan() {
-		text := strings.TrimRight(sc.Text(), "\r")
-		l := LogLine{Stream: stream, Text: text}
-		if ts, rest, ok := strings.Cut(text, " "); ok {
-			if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
-				l.Time, l.Text = t, rest
-			}
-		}
-		lines = append(lines, l)
-	}
-	return lines, sc.Err()
 }

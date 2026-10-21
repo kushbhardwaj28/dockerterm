@@ -36,11 +36,14 @@ dockerterm -debug              # writes a debug log to $TMPDIR/dockerterm-debug.
 | `s` `x` `r` `p` | start, stop, restart, pause / unpause |
 | `d` | remove (asks first); also removes images, volumes and networks |
 | `l` `t` `i` | jump to logs, stats, inspect |
+| Logs: `K` / `J`, `[` / `]`, `F` | scroll, page older / newer, follow newest again |
 | `e` | open a shell in the container (uses the `docker` CLI) |
 | `Enter` | toggle the details pane |
 | `z` | details full width and back (`Esc` also returns); `↑` `↓` still switch container |
 | `v` | show / hide secret values in Env and Inspect (resets when you select another container) |
 | `ctrl+r`, `?`, `q` | refresh now, help, quit |
+
+Logs stream live (`docker logs -f`). Scrolling up pauses the view (new lines are counted, not lost) and loads older history automatically as you reach the top, back to the container's first line; `F` jumps back to live. Up to 50,000 lines are kept in memory.
 
 Environment variables whose names look secret (`*PASSWORD*`, `*TOKEN*`, `*KEY*`…) are masked in the Env and Inspect tabs until you press `v`.
 

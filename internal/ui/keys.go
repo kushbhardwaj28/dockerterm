@@ -10,6 +10,7 @@ type keyMap struct {
 	NextTab, PrevTab, Details             key.Binding
 	ScrollUp, ScrollDown                  key.Binding
 	Zoom, Reveal                          key.Binding
+	LogPageUp, LogPageDown, Follow        key.Binding
 
 	Start, Stop, Restart, Pause, Remove key.Binding
 	Logs, Exec, Stats, Inspect          key.Binding
@@ -43,13 +44,16 @@ func defaultKeys() keyMap {
 		Clear:       kb([]string{"esc"}, "Esc", "clear filter / close"),
 		CycleFilter: kb([]string{"f"}, "f", "all / running / stopped"),
 
-		NextTab:    kb([]string{"tab"}, "Tab", "next detail tab"),
-		PrevTab:    kb([]string{"shift+tab"}, "S-Tab", "previous tab"),
-		Details:    kb([]string{"enter"}, "Enter", "toggle details"),
-		ScrollUp:   kb([]string{"K", "shift+up"}, "K", "scroll details up"),
-		ScrollDown: kb([]string{"J", "shift+down"}, "J", "scroll details down"),
-		Zoom:       kb([]string{"z"}, "z", "details full width / back"),
-		Reveal:     kb([]string{"v"}, "v", "show / hide secret values"),
+		NextTab:     kb([]string{"tab"}, "Tab", "next detail tab"),
+		PrevTab:     kb([]string{"shift+tab"}, "S-Tab", "previous tab"),
+		Details:     kb([]string{"enter"}, "Enter", "toggle details"),
+		ScrollUp:    kb([]string{"K", "shift+up"}, "K", "scroll details up"),
+		ScrollDown:  kb([]string{"J", "shift+down"}, "J", "scroll details down"),
+		Zoom:        kb([]string{"z"}, "z", "details full width / back"),
+		Reveal:      kb([]string{"v"}, "v", "show / hide secret values"),
+		LogPageUp:   kb([]string{"["}, "[ ]", "logs: page older / newer"),
+		LogPageDown: kb([]string{"]"}, "]", "logs: page newer"),
+		Follow:      kb([]string{"F"}, "F", "logs: follow newest again"),
 
 		Start:   kb([]string{"s"}, "s", "start"),
 		Stop:    kb([]string{"x"}, "x", "stop"),
@@ -70,6 +74,12 @@ func defaultKeys() keyMap {
 type footerHint struct{ key, label string }
 
 func (m Model) footerHints() []footerHint {
+	if m.logsShown() {
+		return []footerHint{
+			{"K J", "scroll"}, {"[ ]", "page"}, {"F", "follow"}, {"z", "full width"}, {"↑↓", "container"},
+			{"Tab", "next tab"}, {"x", "stop"}, {"r", "restart"}, {"e", "exec"}, {"?", "help"}, {"q", "quit"},
+		}
+	}
 	if m.view == viewContainers {
 		return []footerHint{
 			{"1-4", "views"}, {"↑↓", "move"}, {"s", "start"}, {"x", "stop"}, {"r", "restart"},
@@ -85,7 +95,7 @@ func (m Model) helpRows() [][2]string {
 	k := m.keys
 	rows := [][2]string{{"1-4", "switch view"}}
 	for _, b := range []key.Binding{
-		k.Up, k.Down, k.Top, k.Bottom, k.Filter, k.Clear, k.CycleFilter, k.NextTab, k.Details, k.Zoom, k.Reveal, k.ScrollDown,
+		k.Up, k.Down, k.Top, k.Bottom, k.Filter, k.Clear, k.CycleFilter, k.NextTab, k.Details, k.Zoom, k.Reveal, k.ScrollDown, k.LogPageUp, k.Follow,
 		k.Start, k.Stop, k.Restart, k.Pause, k.Remove, k.Logs, k.Exec, k.Stats, k.Inspect, k.Refresh, k.Quit,
 	} {
 		h := b.Help()

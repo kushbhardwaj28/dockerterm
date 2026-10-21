@@ -175,7 +175,21 @@ func fakeDaemon(t *testing.T) *Client {
 			w.WriteHeader(http.StatusNoContent)
 		case path == "/containers/aaa/json":
 			_ = json.NewEncoder(w).Encode(container.InspectResponse{ID: "aaa", Config: &container.Config{Tty: false, Env: []string{"A=1"}}})
+		case path == "/containers/aaa/logs" && r.URL.Query().Get("follow") == "1":
+			if got := r.URL.Query().Get("since"); got != "1792490000.000000001" {
+				t.Errorf("since = %q", got)
+			}
+			// a line split across frames, and output arriving over time
+			_, _ = w.Write(muxFrame(stdcopy.Stdout, "2026-10-20T10:41:02.000000000Z first\n2026-10-20T10:41:03.0Z sec"))
+			w.(http.Flusher).Flush()
+			time.Sleep(150 * time.Millisecond)
+			_, _ = w.Write(muxFrame(stdcopy.Stdout, "ond\n"))
+			_, _ = w.Write(muxFrame(stdcopy.Stderr, "2026-10-20T10:41:04.0Z boom\n"))
+			w.(http.Flusher).Flush()
 		case path == "/containers/aaa/logs":
+			if got := r.URL.Query().Get("until"); got != "" && got != "1792490000.000000001" {
+				t.Errorf("until = %q", got)
+			}
 			w.Header().Set("Content-Type", "application/vnd.docker.multiplexed-stream")
 			_, _ = w.Write(muxFrame(stdcopy.Stdout, "2026-10-20T10:41:02.000000000Z hello\n"))
 			_, _ = w.Write(muxFrame(stdcopy.Stderr, "2026-10-20T10:41:03.000000000Z oops\n"))
@@ -278,9 +292,43 @@ func TestClientActionsInspectAndLogs(t *testing.T) {
 	if err != nil || d.ID != "aaa" || d.Env[0] != "A=1" || !strings.Contains(d.Raw, "\n  ") {
 		t.Errorf("inspect = %+v, %v", d, err)
 	}
-	logs, err := c.Logs(ctx, "aaa", 10)
+	logs, err := c.Logs(ctx, "aaa", LogQuery{Tail: 10})
 	if err != nil || len(logs) != 2 || logs[0].Text != "hello" || logs[1].Stream != "stderr" || logs[1].Time.Second() != 3 {
 		t.Errorf("logs = %+v, %v", logs, err)
+	}
+}
+
+func TestFollowLogsStreamsInBatches(t *testing.T) {
+	c := fakeDaemon(t)
+	var batches [][]LogLine
+	err := c.FollowLogs(context.Background(), "aaa", LogQuery{Since: time.Unix(1792490000, 1)}, func(l []LogLine) {
+		batches = append(batches, l)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var texts []string
+	for _, b := range batches {
+		for _, l := range b {
+			texts = append(texts, l.Stream+":"+l.Text)
+		}
+	}
+	if got := strings.Join(texts, ","); got != "stdout:first,stdout:second,stderr:boom" {
+		t.Errorf("lines = %s", got)
+	}
+	if len(batches) < 2 {
+		t.Errorf("got %d batch(es); output that arrives later must come in a later batch", len(batches))
+	}
+	if _, err := c.Logs(context.Background(), "aaa", LogQuery{Tail: 5, Until: time.Unix(1792490000, 1)}); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestReadLogStreamTTY(t *testing.T) {
+	var got []LogLine
+	err := readLogStream(strings.NewReader("2026-10-20T10:41:02Z hello\r\nno timestamp\n"), true, func(l LogLine) { got = append(got, l) })
+	if err != nil || len(got) != 2 || got[0].Text != "hello" || got[0].Time.IsZero() || got[1].Text != "no timestamp" {
+		t.Errorf("tty lines = %+v, %v", got, err)
 	}
 }
 

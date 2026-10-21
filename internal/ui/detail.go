@@ -34,9 +34,9 @@ func (m Model) renderDetail(w, h int) string {
 	}
 	// Scroll the body; logs are anchored to the bottom like a terminal.
 	room := max(0, h-len(head))
-	if m.view == viewContainers && m.tab == tabLogs {
-		end := max(0, len(body)-m.detailTop)
-		body = body[max(0, end-room):end]
+	if m.logsShown() {
+		// logsView already rendered exactly the visible window
+		body = body[:min(len(body), room)]
 	} else {
 		top := min(m.detailTop, max(0, len(body)-room))
 		body = body[top:]
@@ -122,9 +122,9 @@ func (m Model) containerDetail(w, h int) ([]string, []string) {
 	}, w)
 	head = append(head, m.renderTabs(w), hline(w))
 	if m.tab == tabLogs {
-		head = append(head, spread(
-			sDim.Render(fmt.Sprintf("docker logs -f --tail %d %s", logTail, c.Name)),
-			sUp.Render("● following"), w))
+		status := m.logsStatus()
+		left := fit(sDim.Render("docker logs -f "+c.Name), max(0, w-lipgloss.Width(status)-2))
+		head = append(head, spread(left, status, w))
 	}
 
 	var body []string
@@ -132,7 +132,7 @@ func (m Model) containerDetail(w, h int) ([]string, []string) {
 	case tabInfo:
 		body = m.infoTab(c, w)
 	case tabLogs:
-		body = m.logsTab(c, w)
+		body = m.logsView(w, max(1, h-len(head)-1))
 	case tabStats:
 		body = m.statsTab(c, w)
 	case tabEnv:
@@ -214,35 +214,6 @@ func logLevel(l docker.LogLine) (string, lipgloss.Style) {
 		return "ERR", sDown
 	}
 	return "OUT", sDim
-}
-
-func (m Model) logsTab(c *docker.Container, w int) []string {
-	var lines []string
-	if m.logsFor != c.ID {
-		return append(lines, sMuted.Render("loading logs…"))
-	}
-	if len(m.logs) == 0 {
-		return append(lines, sMuted.Render("no output yet"))
-	}
-	const prefix = 9 + 6 // "15:04:05 " + "LEVEL "
-	for _, l := range m.logs {
-		lvl, st := logLevel(l)
-		ts := "        "
-		if !l.Time.IsZero() {
-			ts = l.Time.Local().Format("15:04:05")
-		}
-		text := strings.TrimSpace(ansi.Strip(l.Text))
-		// drop a leading level word we already show in its own column
-		if word, rest, ok := strings.Cut(text, " "); ok && strings.EqualFold(strings.Trim(word, "[]:"), lvl) {
-			text = rest
-		}
-		msg := strings.Split(ansi.Wrap(text, max(10, w-prefix), "/,"), "\n")
-		lines = append(lines, fit(sDim.Render(ts)+" "+st.Render(fit(lvl, 5))+" "+sText.Render(msg[0]), w))
-		for _, more := range msg[1:] {
-			lines = append(lines, fit(strings.Repeat(" ", prefix)+sText.Render(more), w))
-		}
-	}
-	return lines
 }
 
 func (m Model) statsTab(c *docker.Container, w int) []string {

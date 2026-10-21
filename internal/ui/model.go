@@ -24,7 +24,8 @@ type Backend interface {
 	ListNetworks(ctx context.Context) ([]docker.Network, error)
 	DiskUsage(ctx context.Context) (docker.DiskUsage, error)
 	InspectContainer(ctx context.Context, id string) (docker.ContainerDetail, error)
-	Logs(ctx context.Context, id string, tail int) ([]docker.LogLine, error)
+	Logs(ctx context.Context, id string, q docker.LogQuery) ([]docker.LogLine, error)
+	FollowLogs(ctx context.Context, id string, q docker.LogQuery, emit func([]docker.LogLine)) error
 
 	StartContainer(ctx context.Context, id string) error
 	StopContainer(ctx context.Context, id string) error
@@ -82,7 +83,6 @@ const (
 var filterNames = []string{"all", "running", "stopped"}
 
 const (
-	logTail     = 200
 	historySize = 60
 	diskEvery   = 30 * time.Second
 )
@@ -118,8 +118,8 @@ type Model struct {
 	networks   []docker.Network
 	disk       *docker.DiskUsage
 	detail     *docker.ContainerDetail
-	logs       []docker.LogLine
-	logsFor    string
+	log        logState
+	logGen     int
 	lastUpdate time.Time
 
 	// refresh state
@@ -196,11 +196,6 @@ type (
 		detail docker.ContainerDetail
 		err    error
 	}
-	logsMsg struct {
-		id    string
-		lines []docker.LogLine
-		err   error
-	}
 	actionMsg struct {
 		done string
 		err  error
@@ -251,15 +246,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case logsMsg:
-		if c := m.selectedContainer(); c != nil && c.ID == msg.id {
-			if msg.err != nil {
-				m.setToast(msg.err.Error(), toastErr)
-			} else {
-				m.logs, m.logsFor = msg.lines, msg.id
-			}
-		}
-		return m, nil
+	case logBatchMsg:
+		return m, m.handleLogBatch(msg)
+	case olderLogsMsg:
+		return m, m.handleOlderLogs(msg)
+	case logReconnectMsg:
+		return m, m.handleLogReconnect(msg)
 
 	case actionMsg:
 		if msg.err != nil {
@@ -344,16 +336,13 @@ func (m *Model) recordHistory() {
 }
 
 // selectionCmds fetches what the detail pane needs for the selected container.
-func (m Model) selectionCmds() []tea.Cmd {
+func (m *Model) selectionCmds() []tea.Cmd {
+	logs := m.ensureLogs()
 	c := m.selectedContainer()
 	if m.view != viewContainers || c == nil {
 		return nil
 	}
-	cmds := []tea.Cmd{m.inspectCmd(c.ID)}
-	if m.tab == tabLogs {
-		cmds = append(cmds, m.logsCmd(c.ID))
-	}
-	return cmds
+	return []tea.Cmd{m.inspectCmd(c.ID), logs}
 }
 
 // selectionChanged resets per-container state after the cursor moved.
@@ -362,7 +351,8 @@ func (m *Model) selectionChanged(before string) tea.Cmd {
 		return nil
 	}
 	m.reveal = false // secrets are revealed per container, never carried over
-	m.detail, m.logs, m.logsFor, m.detailTop = nil, nil, "", 0
+	m.detail, m.detailTop = nil, 0
+	m.stopLogs()
 	return tea.Batch(m.selectionCmds()...)
 }
 
@@ -425,6 +415,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	before := m.selectedKey()
 	switch {
 	case key.Matches(msg, k.Quit):
+		m.stopLogs()
 		return m, tea.Quit
 	case key.Matches(msg, k.Help):
 		m.help = true
@@ -485,6 +476,16 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.setTab((m.tab + 1) % numTabs)
 	case key.Matches(msg, k.PrevTab) && m.view == viewContainers:
 		return m, m.setTab((m.tab + numTabs - 1) % numTabs)
+	case key.Matches(msg, k.ScrollDown) && m.logsShown():
+		return m, m.scrollLogs(-3)
+	case key.Matches(msg, k.ScrollUp) && m.logsShown():
+		return m, m.scrollLogs(3)
+	case key.Matches(msg, k.LogPageDown) && m.logsShown():
+		return m, m.scrollLogs(-m.logPage())
+	case key.Matches(msg, k.LogPageUp) && m.logsShown():
+		return m, m.scrollLogs(m.logPage())
+	case key.Matches(msg, k.Follow) && m.logsShown():
+		m.followLogs()
 	case key.Matches(msg, k.ScrollDown):
 		m.detailTop += 3
 	case key.Matches(msg, k.ScrollUp):
@@ -500,7 +501,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, k.Start, k.Stop, k.Restart, k.Pause, k.Remove, k.Exec):
 		return m, m.action(msg)
 	}
-	return m, m.selectionChanged(before)
+	return m, tea.Batch(m.selectionChanged(before), m.ensureLogs())
 }
 
 func (m *Model) setTab(t detailTab) tea.Cmd {
@@ -508,11 +509,19 @@ func (m *Model) setTab(t detailTab) tea.Cmd {
 	if !m.detailsOpen {
 		m.detailsOpen = true
 	}
-	if c := m.selectedContainer(); c != nil && t == tabLogs {
-		return m.logsCmd(c.ID)
+	if t == tabLogs {
+		m.followLogs()
 	}
-	return nil
+	return m.ensureLogs()
 }
+
+// logsShown reports whether the Logs tab is on screen.
+func (m Model) logsShown() bool {
+	return m.view == viewContainers && m.tab == tabLogs && m.selectedContainer() != nil
+}
+
+// logPage is how far [ and ] scroll: most of a screen.
+func (m Model) logPage() int { return max(5, m.layout().bodyH*2/3) }
 
 func (m *Model) move(delta int) {
 	m.cursor[m.view] += delta
@@ -608,15 +617,6 @@ func (m Model) inspectCmd(id string) tea.Cmd {
 		defer cancel()
 		d, err := m.backend.InspectContainer(ctx, id)
 		return detailMsg{detail: d, err: err}
-	}
-}
-
-func (m Model) logsCmd(id string) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := m.ctx()
-		defer cancel()
-		lines, err := m.backend.Logs(ctx, id, logTail)
-		return logsMsg{id: id, lines: lines, err: err}
 	}
 }
 
