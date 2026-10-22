@@ -38,9 +38,29 @@ dockerterm -debug              # writes a debug log to $TMPDIR/dockerterm-debug.
 | `l` `t` `i` | jump to logs, stats, inspect |
 | `e` | open a shell in the container (uses the `docker` CLI) |
 | `Enter` | toggle the details pane |
+| `z` | details full width and back (`Esc` also returns); `↑` `↓` still switch container |
+| `v` | show / hide secret values in Env and Inspect (resets when you select another container) |
 | `ctrl+r`, `?`, `q` | refresh now, help, quit |
 
-Environment variables whose names look secret (`*PASSWORD*`, `*TOKEN*`, `*KEY*`…) are masked in the Env tab.
+### Logs
+
+Logs stream live (`docker logs -f`). Press `Enter` on the Logs tab to browse them; the keys then drive the log viewer and the current line is highlighted:
+
+| Key | Action |
+| --- | --- |
+| `↑` `↓`, `[` `]` | previous / next line, page |
+| `g`, `G` | oldest line (loads older history as you go), back to live |
+| `/`, `n` `N` | search (matches highlighted, `3/27`), next / previous match — keeps searching into older history |
+| `&` | show only lines containing some text |
+| `e`, `w`, `a` | errors only, warnings and errors, all levels |
+| `o` | stdout only / stderr only / both |
+| `c` | clear all filters |
+| `Enter`, `y` | open the line in full (JSON is pretty-printed), copy it to the clipboard |
+| `Esc` | clear the search, then give the keys back to the container list |
+
+While you browse, new lines keep arriving but the view stays put (the header counts them); `G` returns to live. Up to 50,000 lines are kept in memory.
+
+Environment variables whose names look secret (`*PASSWORD*`, `*TOKEN*`, `*KEY*`…) are masked in the Env and Inspect tabs until you press `v`.
 
 ### Which daemon it connects to
 

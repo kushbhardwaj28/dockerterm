@@ -24,6 +24,8 @@ type fakeBackend struct {
 	volumes    []docker.Volume
 	networks   []docker.Network
 	logs       []docker.LogLine
+	live       chan []docker.LogLine
+	logQueries []docker.LogQuery
 	listErr    error
 	statsIDs   []string
 	calls      []string
@@ -53,10 +55,52 @@ func (f *fakeBackend) DiskUsage(context.Context) (docker.DiskUsage, error) {
 	return docker.DiskUsage{Images: 4 << 30, Volumes: 2 << 30}, nil
 }
 func (f *fakeBackend) InspectContainer(_ context.Context, id string) (docker.ContainerDetail, error) {
-	return docker.ContainerDetail{ID: id, Env: []string{"NODE_ENV=production", "DB_PASSWORD=hunter2"}, RestartPolicy: "always"}, nil
+	return docker.ContainerDetail{ID: id, Env: []string{"NODE_ENV=production", "DB_PASSWORD=hunter2"}, RestartPolicy: "always",
+		Raw: "{\n  \"Env\": [\n    \"NODE_ENV=production\",\n    \"DB_PASSWORD=hunter2\"\n  ]\n}"}, nil
 }
-func (f *fakeBackend) Logs(context.Context, string, int) ([]docker.LogLine, error) {
-	return f.logs, nil
+
+// Logs behaves like the daemon: tail is applied to the whole log first, then
+// since/until (both inclusive) filter what is left.
+func (f *fakeBackend) Logs(_ context.Context, _ string, q docker.LogQuery) ([]docker.LogLine, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logQueries = append(f.logQueries, q)
+	all := f.logs
+	if q.Tail > 0 && len(all) > q.Tail {
+		all = all[len(all)-q.Tail:]
+	}
+	var out []docker.LogLine
+	for _, l := range all {
+		if (!q.Since.IsZero() && l.Time.Before(q.Since)) || (!q.Until.IsZero() && l.Time.After(q.Until)) {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out, nil
+}
+
+// FollowLogs sends the tail of f.logs, then whatever is pushed on f.live,
+// until the stream is cancelled or f.live is closed (container stopped).
+func (f *fakeBackend) FollowLogs(ctx context.Context, id string, q docker.LogQuery, emit func([]docker.LogLine)) error {
+	first, _ := f.Logs(ctx, id, docker.LogQuery{Tail: q.Tail})
+	if q.Since.IsZero() {
+		emit(first)
+	}
+	if f.live == nil {
+		<-ctx.Done()
+		return nil
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case batch, ok := <-f.live:
+			if !ok {
+				return nil
+			}
+			emit(batch)
+		}
+	}
 }
 func (f *fakeBackend) StartContainer(_ context.Context, id string) error {
 	return f.record("start " + id)
@@ -201,7 +245,7 @@ func TestWideLayoutMatchesDesign(t *testing.T) {
 		"api-server   RUNNING", "x stop", "r restart", "p pause", "l logs", "e exec", "d remove",
 		"Info", "Logs", "Stats", "Env", "Mounts", "Inspect", "Status", "Up 3 days",
 		// status + keys
-		"NORMAL", "auto-refresh 2s · 10:41:25", "s  start", "t  stats", "q  quit",
+		"NORMAL", "auto-refresh 2s · 10:41:25", "s  start", "z  full width", "v  secrets", "q  quit",
 	)
 	assertSize(t, m, 160, 40)
 }
@@ -377,11 +421,11 @@ func TestDetailTabs(t *testing.T) {
 
 	m, cmd = step(t, m, press("l"))
 	if m.tab != tabLogs || cmd == nil {
-		t.Fatal("l must open logs and fetch them")
+		t.Fatal("l must open logs and stream them")
 	}
-	m, _ = step(t, m, drain(cmd)...)
+	m = feedLogs(t, m, cmd)
 	s := screen(m)
-	assertContains(t, s, "docker logs -f --tail 200 web-nginx", "● following", "10:41:02 INFO  GET /api/users", "ERROR connection refused")
+	assertContains(t, s, "docker logs -f web-nginx", "● live · 2 lines", "10:41:02 INFO  GET /api/users", "ERROR connection refused")
 	if strings.Contains(s, "INFO  INFO") {
 		t.Error("level must not be repeated in the message")
 	}
@@ -424,6 +468,84 @@ func TestFormatting(t *testing.T) {
 		}
 		if total != w {
 			t.Errorf("columns at %d use %d cells", w, total)
+		}
+	}
+}
+
+func loadDetail(t *testing.T, m Model, cmd tea.Cmd) Model {
+	t.Helper()
+	for _, msg := range drain(cmd) {
+		if _, ok := msg.(detailMsg); ok {
+			m, _ = step(t, m, msg)
+		}
+	}
+	return m
+}
+
+func TestZoomTogglesFullWidthDetails(t *testing.T) {
+	m, cmd := step(t, newModel(nil), tea.WindowSizeMsg{Width: 160, Height: 30}, sample())
+	m = loadDetail(t, m, cmd)
+	assertContains(t, screen(m), "RESOURCES", "NAME", "z full width")
+
+	m, _ = step(t, m, press("z"))
+	s := screen(m)
+	if strings.Contains(s, "RESOURCES") || strings.Contains(s, "STATUS") {
+		t.Error("full-width details must hide the sidebar and the list")
+	}
+	assertContains(t, s, "web-nginx   RUNNING", "z back", "DETAILS")
+	assertSize(t, m, 160, 30)
+	if got := m.layout(); !got.detailOnly || got.hasSidebar {
+		t.Errorf("layout = %+v, want details only", got)
+	}
+
+	// moving still changes the container shown
+	m, _ = step(t, m, press("down"))
+	assertContains(t, screen(m), "api-server   RUNNING")
+
+	m, _ = step(t, m, press("z"))
+	assertContains(t, screen(m), "RESOURCES", "NAME")
+	assertSize(t, m, 160, 30)
+
+	m, _ = step(t, m, press("z"), press("esc"))
+	if m.zoom {
+		t.Error("esc must leave full width")
+	}
+}
+
+func TestRevealSecrets(t *testing.T) {
+	m, cmd := step(t, newModel(nil), tea.WindowSizeMsg{Width: 160, Height: 30}, sample())
+	m = loadDetail(t, m, cmd)
+	m, _ = step(t, m, press("tab"), press("tab"), press("tab")) // Env
+	s := screen(m)
+	assertContains(t, s, "DB_PASSWORD=••••••••", "NODE_ENV=production", "1 secret value(s) hidden · v to show")
+	if strings.Contains(s, "hunter2") {
+		t.Fatal("secret shown before reveal")
+	}
+
+	m, _ = step(t, m, press("v"))
+	assertContains(t, screen(m), "DB_PASSWORD=hunter2", "visible · v to hide")
+
+	m, _ = step(t, m, press("i")) // inspect follows the same toggle
+	assertContains(t, screen(m), `"DB_PASSWORD=hunter2"`)
+	m, _ = step(t, m, press("v"))
+	assertContains(t, screen(m), `"DB_PASSWORD=••••••••"`, `"NODE_ENV=production"`)
+
+	// revealing is per container: moving away hides again
+	m, _ = step(t, m, press("v"), press("down"))
+	if m.reveal {
+		t.Error("reveal must reset when another container is selected")
+	}
+}
+
+func TestMaskEnvJSON(t *testing.T) {
+	for in, want := range map[string]string{
+		`    "API_TOKEN=abc",`:  `    "API_TOKEN=••••••••",`,
+		`    "DB_PASSWORD=x=y"`: `    "DB_PASSWORD=••••••••"`,
+		`    "PATH=/usr/bin",`:  `    "PATH=/usr/bin",`,
+		`  "Password": "nope",`: `  "Password": "nope",`,
+	} {
+		if got := maskEnvJSON(in); got != want {
+			t.Errorf("maskEnvJSON(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

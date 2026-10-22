@@ -34,9 +34,9 @@ func (m Model) renderDetail(w, h int) string {
 	}
 	// Scroll the body; logs are anchored to the bottom like a terminal.
 	room := max(0, h-len(head))
-	if m.view == viewContainers && m.tab == tabLogs {
-		end := max(0, len(body)-m.detailTop)
-		body = body[max(0, end-room):end]
+	if m.logsShown() {
+		// logsView already rendered exactly the visible window
+		body = body[:min(len(body), room)]
 	} else {
 		top := min(m.detailTop, max(0, len(body)-room))
 		body = body[top:]
@@ -100,11 +100,8 @@ func kvLines(pairs [][2]string, w int) []string {
 
 // Containers.
 
-func (m Model) containerDetail(w, h int) ([]string, []string) {
-	c := m.selectedContainer()
-	if c == nil {
-		return nil, nil
-	}
+// containerHead is everything above a container's tab content.
+func (m Model) containerHead(c *docker.Container, w int) []string {
 	sub := c.ShortID() + " · " + c.Image
 	if p := c.ComposeProject(); p != "" {
 		sub += " · compose: " + p
@@ -122,17 +119,27 @@ func (m Model) containerDetail(w, h int) ([]string, []string) {
 	}, w)
 	head = append(head, m.renderTabs(w), hline(w))
 	if m.tab == tabLogs {
-		head = append(head, spread(
-			sDim.Render(fmt.Sprintf("docker logs -f --tail %d %s", logTail, c.Name)),
-			sUp.Render("● following"), w))
+		head = append(head, m.logsHeader(c.Name, w), m.logsBar(w))
 	}
+	return head
+}
+
+func (m Model) containerDetail(w, h int) ([]string, []string) {
+	c := m.selectedContainer()
+	if c == nil {
+		return nil, nil
+	}
+	head := m.containerHead(c, w)
 
 	var body []string
 	switch m.tab {
 	case tabInfo:
 		body = m.infoTab(c, w)
 	case tabLogs:
-		body = m.logsTab(c, w)
+		body = m.logsView(w, max(1, h-len(head)-1))
+		if m.log.popup {
+			body = append(body, "") // keeps the layout; the popup is drawn on top
+		}
 	case tabStats:
 		body = m.statsTab(c, w)
 	case tabEnv:
@@ -154,7 +161,11 @@ func (m Model) renderTabs(w int) string {
 			parts = append(parts, sMuted.Render(name))
 		}
 	}
-	return fit(strings.Join(parts, "   "), w)
+	hint := "z full width"
+	if m.zoom {
+		hint = "z back · ↑↓ next container"
+	}
+	return spread(strings.Join(parts, "   "), sDim.Render(hint), w)
 }
 
 func (m Model) infoTab(c *docker.Container, w int) []string {
@@ -212,35 +223,6 @@ func logLevel(l docker.LogLine) (string, lipgloss.Style) {
 	return "OUT", sDim
 }
 
-func (m Model) logsTab(c *docker.Container, w int) []string {
-	var lines []string
-	if m.logsFor != c.ID {
-		return append(lines, sMuted.Render("loading logs…"))
-	}
-	if len(m.logs) == 0 {
-		return append(lines, sMuted.Render("no output yet"))
-	}
-	const prefix = 9 + 6 // "15:04:05 " + "LEVEL "
-	for _, l := range m.logs {
-		lvl, st := logLevel(l)
-		ts := "        "
-		if !l.Time.IsZero() {
-			ts = l.Time.Local().Format("15:04:05")
-		}
-		text := strings.TrimSpace(ansi.Strip(l.Text))
-		// drop a leading level word we already show in its own column
-		if word, rest, ok := strings.Cut(text, " "); ok && strings.EqualFold(strings.Trim(word, "[]:"), lvl) {
-			text = rest
-		}
-		msg := strings.Split(ansi.Wrap(text, max(10, w-prefix), "/,"), "\n")
-		lines = append(lines, fit(sDim.Render(ts)+" "+st.Render(fit(lvl, 5))+" "+sText.Render(msg[0]), w))
-		for _, more := range msg[1:] {
-			lines = append(lines, fit(strings.Repeat(" ", prefix)+sText.Render(more), w))
-		}
-	}
-	return lines
-}
-
 func (m Model) statsTab(c *docker.Container, w int) []string {
 	s, ok := m.stats[c.ID]
 	if !ok {
@@ -289,20 +271,54 @@ func (m Model) statsTab(c *docker.Container, w int) []string {
 
 var secretKey = regexp.MustCompile(`(?i)(pass|secret|token|key|credential|auth)`)
 
+const masked = "••••••••"
+
+func isSecret(k, v string) bool { return v != "" && secretKey.MatchString(k) }
+
+// envJSON matches one "NAME=value" entry of the Env array in inspect output.
+var envJSON = regexp.MustCompile(`^(\s*")([A-Za-z_][A-Za-z0-9_.]*)=(.*)("[,]?)$`)
+
+// maskEnvJSON hides secret values in inspect output, like the Env tab.
+func maskEnvJSON(line string) string {
+	g := envJSON.FindStringSubmatch(line)
+	if g == nil || !isSecret(g[2], g[3]) {
+		return line
+	}
+	return g[1] + g[2] + "=" + masked + g[4]
+}
+
 func (m Model) envTab(w int) []string {
 	if m.detail == nil {
 		return []string{sMuted.Render("loading…")}
 	}
 	var out []string
+	secrets := 0
 	for _, e := range m.detail.Env {
 		k, v, _ := strings.Cut(e, "=")
-		if secretKey.MatchString(k) && v != "" {
-			v = "••••••••"
+		val := sText.Render(v)
+		if isSecret(k, v) {
+			secrets++
+			if m.reveal {
+				val = sPause.Render(v)
+			} else {
+				val = sDim.Render(masked)
+			}
 		}
-		out = append(out, fit(sAccent.Render(k)+sDim.Render("=")+sText.Render(v), w))
+		// long values wrap instead of being cut off
+		lines := strings.Split(ansi.Wrap(sAccent.Render(k)+sDim.Render("=")+val, w, "/,;&"), "\n")
+		for _, l := range lines {
+			out = append(out, fit(l, w))
+		}
 	}
 	if len(out) == 0 {
-		out = []string{sMuted.Render("no environment variables")}
+		return []string{sMuted.Render("no environment variables")}
+	}
+	if secrets > 0 {
+		note := fmt.Sprintf("%d secret value(s) hidden · v to show", secrets)
+		if m.reveal {
+			note = fmt.Sprintf("%d secret value(s) visible · v to hide", secrets)
+		}
+		out = append([]string{sDim.Render(note), ""}, out...)
 	}
 	return out
 }
@@ -340,6 +356,9 @@ func (m Model) inspectTab(w int) []string {
 	}
 	var out []string
 	for _, l := range strings.Split(m.detail.Raw, "\n") {
+		if !m.reveal {
+			l = maskEnvJSON(l)
+		}
 		if g := jsonKey.FindStringSubmatch(l); g != nil {
 			l = g[1] + sAccent.Render(g[2]) + sText.Render(g[3])
 		} else {

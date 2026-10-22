@@ -35,7 +35,10 @@ func (m Model) layout() layout {
 	if w >= 90 {
 		l.sideW, l.hasSidebar = sidebarWidth, true
 	}
-	if m.detailsOpen && m.rowCount() > 0 {
+	if m.zoom && m.rowCount() > 0 {
+		// full-width details: no sidebar, no list
+		l.detailOnly, l.hasSidebar, l.sideW = true, false, 0
+	} else if m.detailsOpen && m.rowCount() > 0 {
 		if w >= 110 {
 			l.detailW = min(72, max(42, w*37/100))
 		} else {
@@ -364,8 +367,16 @@ func (m Model) renderStatus(w int) string {
 		mode = "CONFIRM"
 	case m.help:
 		mode = "HELP"
+	case m.logInputKind == inputSearch:
+		mode = "SEARCH"
+	case m.logInputKind == inputGrep:
+		mode = "FILTER"
+	case m.logsShown() && m.log.focus:
+		mode = "LOGS"
 	case m.query.Focused() || m.query.Value() != "":
 		mode = "FILTER"
+	case m.zoom:
+		mode = "DETAILS"
 	}
 	left := []seg{{" " + mode + " ", sMode}, {"  ", sText}}
 
@@ -399,15 +410,23 @@ func (m Model) renderStatus(w int) string {
 }
 
 func (m Model) renderKeys(w int) string {
+	chip := func(h footerHint) string { return sKeyChip.Render(h.key) + " " + sMuted.Render(h.label) + "  " }
+	hints := m.footerHints()
+	// "? help" and "q quit" always stay visible; drop others from the end to fit.
+	tail := chip(footerHint{"?", "help"}) + chip(footerHint{"q", "quit"})
 	var b strings.Builder
 	b.WriteString(" ")
-	for _, h := range m.footerHints() {
-		b.WriteString(sKeyChip.Render(h.key))
-		b.WriteString(" ")
-		b.WriteString(sMuted.Render(h.label))
-		b.WriteString("  ")
+	for _, h := range hints {
+		if h.key == "?" || h.key == "q" {
+			continue
+		}
+		c := chip(h)
+		if lipgloss.Width(b.String())+lipgloss.Width(c)+lipgloss.Width(tail) > w {
+			break
+		}
+		b.WriteString(c)
 	}
-	return fit(b.String(), w)
+	return fit(b.String()+tail, w)
 }
 
 // Overlays.
@@ -419,6 +438,8 @@ func (m Model) overlay(screen string, l layout) string {
 		dialog = m.renderConfirm(min(56, l.w-4))
 	case m.help:
 		dialog = m.renderHelp(min(76, l.w-4))
+	case m.log.popup && m.logsShown():
+		dialog = m.renderLogPopup(min(110, l.w-4), l.h)
 	default:
 		return screen
 	}

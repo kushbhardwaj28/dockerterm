@@ -24,7 +24,8 @@ type Backend interface {
 	ListNetworks(ctx context.Context) ([]docker.Network, error)
 	DiskUsage(ctx context.Context) (docker.DiskUsage, error)
 	InspectContainer(ctx context.Context, id string) (docker.ContainerDetail, error)
-	Logs(ctx context.Context, id string, tail int) ([]docker.LogLine, error)
+	Logs(ctx context.Context, id string, q docker.LogQuery) ([]docker.LogLine, error)
+	FollowLogs(ctx context.Context, id string, q docker.LogQuery, emit func([]docker.LogLine)) error
 
 	StartContainer(ctx context.Context, id string) error
 	StopContainer(ctx context.Context, id string) error
@@ -82,7 +83,6 @@ const (
 var filterNames = []string{"all", "running", "stopped"}
 
 const (
-	logTail     = 200
 	historySize = 60
 	diskEvery   = 30 * time.Second
 )
@@ -118,8 +118,8 @@ type Model struct {
 	networks   []docker.Network
 	disk       *docker.DiskUsage
 	detail     *docker.ContainerDetail
-	logs       []docker.LogLine
-	logsFor    string
+	log        logState
+	logGen     int
 	lastUpdate time.Time
 
 	// refresh state
@@ -132,14 +132,18 @@ type Model struct {
 	diskAsked   time.Time
 
 	// navigation
-	view        viewKind
-	cursor      [numViews]int
-	offset      [numViews]int
-	filter      stateFilter
-	query       textinput.Model
-	tab         detailTab
-	detailTop   int // scroll offset inside the detail tab
-	detailsOpen bool
+	view         viewKind
+	cursor       [numViews]int
+	offset       [numViews]int
+	filter       stateFilter
+	query        textinput.Model
+	logInput     textinput.Model
+	logInputKind logInputKind
+	tab          detailTab
+	detailTop    int // scroll offset inside the detail tab
+	detailsOpen  bool
+	zoom         bool // details pane takes the whole width
+	reveal       bool // show secret-looking env values for the selected container
 
 	// overlays and messages
 	help      bool
@@ -169,6 +173,7 @@ func New(backend Backend, opts Options) Model {
 		stats:       map[string]docker.Stats{},
 		cpuHist:     map[string][]float64{},
 		query:       q,
+		logInput:    newLogInput(),
 		detailsOpen: true,
 		toast:       "connecting to docker…",
 	}
@@ -193,11 +198,6 @@ type (
 	detailMsg struct {
 		detail docker.ContainerDetail
 		err    error
-	}
-	logsMsg struct {
-		id    string
-		lines []docker.LogLine
-		err   error
 	}
 	actionMsg struct {
 		done string
@@ -249,15 +249,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case logsMsg:
-		if c := m.selectedContainer(); c != nil && c.ID == msg.id {
-			if msg.err != nil {
-				m.setToast(msg.err.Error(), toastErr)
-			} else {
-				m.logs, m.logsFor = msg.lines, msg.id
-			}
-		}
-		return m, nil
+	case logBatchMsg:
+		return m, m.handleLogBatch(msg)
+	case olderLogsMsg:
+		return m, m.handleOlderLogs(msg)
+	case logReconnectMsg:
+		return m, m.handleLogReconnect(msg)
 
 	case actionMsg:
 		if msg.err != nil {
@@ -342,16 +339,13 @@ func (m *Model) recordHistory() {
 }
 
 // selectionCmds fetches what the detail pane needs for the selected container.
-func (m Model) selectionCmds() []tea.Cmd {
+func (m *Model) selectionCmds() []tea.Cmd {
+	logs := m.ensureLogs()
 	c := m.selectedContainer()
 	if m.view != viewContainers || c == nil {
 		return nil
 	}
-	cmds := []tea.Cmd{m.inspectCmd(c.ID)}
-	if m.tab == tabLogs {
-		cmds = append(cmds, m.logsCmd(c.ID))
-	}
-	return cmds
+	return []tea.Cmd{m.inspectCmd(c.ID), logs}
 }
 
 // selectionChanged resets per-container state after the cursor moved.
@@ -359,7 +353,9 @@ func (m *Model) selectionChanged(before string) tea.Cmd {
 	if m.selectedKey() == before {
 		return nil
 	}
-	m.detail, m.logs, m.logsFor, m.detailTop = nil, nil, "", 0
+	m.reveal = false // secrets are revealed per container, never carried over
+	m.detail, m.detailTop = nil, 0
+	m.stopLogs()
 	return tea.Batch(m.selectionCmds()...)
 }
 
@@ -419,9 +415,39 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.selectionChanged(before)
 	}
 
+	if m.logInputKind != inputNone {
+		return m, m.logInputKey(msg)
+	}
+	if m.logsShown() && m.log.focus && !key.Matches(msg, k.Quit) {
+		if cmd, handled := m.logKey(msg); handled {
+			return m, cmd
+		}
+	}
+
+	if m.logsShown() && !m.log.focus && (key.Matches(msg, k.Details, k.ScrollUp, k.ScrollDown, k.LogPageUp, k.LogPageDown) ||
+		(key.Matches(msg, k.Logs) && m.tab == tabLogs)) {
+		// browse the logs: the arrow keys now move the highlighted line
+		m.log.focus = true
+		if m.log.follow {
+			m.pinFollow()
+		}
+		switch {
+		case key.Matches(msg, k.ScrollUp):
+			return m, m.moveLog(-3)
+		case key.Matches(msg, k.ScrollDown):
+			return m, m.moveLog(3)
+		case key.Matches(msg, k.LogPageUp):
+			return m, m.moveLog(-max(1, m.logRoom()-2))
+		case key.Matches(msg, k.LogPageDown):
+			return m, m.moveLog(max(1, m.logRoom()-2))
+		}
+		return m, nil
+	}
+
 	before := m.selectedKey()
 	switch {
 	case key.Matches(msg, k.Quit):
+		m.stopLogs()
 		return m, tea.Quit
 	case key.Matches(msg, k.Help):
 		m.help = true
@@ -435,6 +461,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, k.Filter):
 		return m, m.query.Focus()
 	case key.Matches(msg, k.Clear):
+		if m.zoom && m.query.Value() == "" {
+			m.zoom = false
+		}
 		m.query.SetValue("")
 		m.clampCursor()
 	case key.Matches(msg, k.CycleFilter) && m.view == viewContainers:
@@ -456,13 +485,31 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.move(m.listRows())
 
 	case key.Matches(msg, k.Details):
-		if m.rowCount() > 0 {
+		switch {
+		case m.zoom:
+			m.zoom = false
+		case m.rowCount() > 0:
 			m.detailsOpen = !m.detailsOpen
+		}
+	case key.Matches(msg, k.Zoom):
+		if m.zoom || m.rowCount() > 0 {
+			m.zoom = !m.zoom
+			m.detailsOpen = true
+			m.detailTop = 0
+		}
+	case key.Matches(msg, k.Reveal) && m.view == viewContainers:
+		m.reveal = !m.reveal
+		if m.reveal {
+			m.setToast("secret values visible for "+m.selectedKeyName()+" — v to hide", toastWarn)
+		} else {
+			m.setToast("secret values hidden", toastInfo)
 		}
 	case key.Matches(msg, k.NextTab) && m.view == viewContainers:
 		return m, m.setTab((m.tab + 1) % numTabs)
 	case key.Matches(msg, k.PrevTab) && m.view == viewContainers:
 		return m, m.setTab((m.tab + numTabs - 1) % numTabs)
+	case key.Matches(msg, k.Follow) && m.logsShown():
+		m.followLogs()
 	case key.Matches(msg, k.ScrollDown):
 		m.detailTop += 3
 	case key.Matches(msg, k.ScrollUp):
@@ -478,7 +525,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, k.Start, k.Stop, k.Restart, k.Pause, k.Remove, k.Exec):
 		return m, m.action(msg)
 	}
-	return m, m.selectionChanged(before)
+	return m, tea.Batch(m.selectionChanged(before), m.ensureLogs())
 }
 
 func (m *Model) setTab(t detailTab) tea.Cmd {
@@ -486,10 +533,15 @@ func (m *Model) setTab(t detailTab) tea.Cmd {
 	if !m.detailsOpen {
 		m.detailsOpen = true
 	}
-	if c := m.selectedContainer(); c != nil && t == tabLogs {
-		return m.logsCmd(c.ID)
+	if t == tabLogs {
+		m.followLogs()
 	}
-	return nil
+	return m.ensureLogs()
+}
+
+// logsShown reports whether the Logs tab is on screen.
+func (m Model) logsShown() bool {
+	return m.view == viewContainers && m.tab == tabLogs && m.selectedContainer() != nil
 }
 
 func (m *Model) move(delta int) {
@@ -589,11 +641,10 @@ func (m Model) inspectCmd(id string) tea.Cmd {
 	}
 }
 
-func (m Model) logsCmd(id string) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := m.ctx()
-		defer cancel()
-		lines, err := m.backend.Logs(ctx, id, logTail)
-		return logsMsg{id: id, lines: lines, err: err}
+// selectedKeyName is the selected container's name, for messages.
+func (m Model) selectedKeyName() string {
+	if c := m.selectedContainer(); c != nil {
+		return c.Name
 	}
+	return "this container"
 }
