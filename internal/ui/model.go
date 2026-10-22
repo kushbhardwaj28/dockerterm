@@ -544,9 +544,6 @@ func (m Model) logsShown() bool {
 	return m.view == viewContainers && m.tab == tabLogs && m.selectedContainer() != nil
 }
 
-// logPage is how far [ and ] scroll: most of a screen.
-func (m Model) logPage() int { return max(5, m.layout().bodyH*2/3) }
-
 func (m *Model) move(delta int) {
 	m.cursor[m.view] += delta
 	m.clampCursor()
